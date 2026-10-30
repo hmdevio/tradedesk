@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="TradeDesk customer, job, and service-report dashboard">
+  <title>TradeDesk</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>TradeDesk</h1>
+      <p class="eyebrow">by PACCTECH LLC</p>
+      <p class="subtitle">Customer and job documentation, in one place.</p>
+    </div>
+    <button id="logoutButton" class="secondary hidden" type="button">Log out</button>
+  </header>
+
+  <main>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+    <section id="authPanel" class="panel">
+      <h2>Sign in or create an account</h2>
+      <p class="muted">Use a unique test account. Never enter a password you use elsewhere.</p>
+      <form id="authForm" class="form-grid">
+        <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320"></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required></label>
+        <div class="button-row">
+          <button type="submit" data-mode="login">Sign in</button>
+          <button type="submit" class="secondary" data-mode="register">Create account</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="appPanel" class="hidden">
+      <div class="dashboard-grid">
+        <section class="panel">
+          <h2>1. Add a customer</h2>
+          <form id="customerForm" class="form-grid">
+            <label>Name <input name="name" required maxlength="120"></label>
+            <label>Email <input name="email" type="email" maxlength="320"></label>
+            <label>Phone <input name="phone" maxlength="40"></label>
+            <label>Address <input name="address" maxlength="300"></label>
+            <button type="submit">Save customer</button>
+          </form>
+          <h3>Your customers</h3>
+          <ul id="customerList" class="record-list"></ul>
+        </section>
+
+        <section class="panel">
+          <h2>2. Create a job</h2>
+          <form id="jobForm" class="form-grid">
+            <label>Customer
+              <select name="customer_id" id="jobCustomer" required>
+                <option value="">Create a customer first</option>
+              </select>
+            </label>
+            <label>Job title <input name="title" required maxlength="200"></label>
+            <label>Trade type <input name="trade_type" required maxlength="80" placeholder="Plumbing, HVAC, etc."></label>
+            <label>Description <textarea name="description" maxlength="4000" rows="2"></textarea></label>
+            <label>Job notes <textarea name="notes" maxlength="10000" rows="3"></textarea></label>
+            <button type="submit">Save job</button>
+          </form>
+          <h3>Your jobs</h3>
+          <ul id="jobList" class="record-list"></ul>
+        </section>
+
+        <section class="panel wide">
+          <h2>3. Draft, review, approve, export</h2>
+          <form id="reportForm" class="form-grid">
+            <label>Job
+              <select name="job_id" id="reportJob" required>
+                <option value="">Create a job first</option>
+              </select>
+            </label>
+            <label>Original job notes
+              <textarea name="notes" rows="4" maxlength="10000" required placeholder="Only include facts actually observed or work actually performed."></textarea>
+            </label>
+            <button type="submit">Generate report draft</button>
+          </form>
+          <div id="reportArea" class="report-area hidden">
+            <p><strong>Report status:</strong> <span id="reportStatus">Draft</span></p>
+            <label>Report content (review and edit before approval)
+              <textarea id="reportContent" rows="8" maxlength="10000"></textarea>
+            </label>
+            <div class="button-row">
+              <button id="saveReportButton" type="button">Save edits</button>
+              <button id="approveReportButton" type="button">Approve report</button>
+              <button id="pdfButton" type="button" class="secondary">Download approved PDF</button>
+            </div>
+            <p class="muted">The local fallback is a formatter, not a real AI model. It does not send notes to an external service.</p>
+          </div>
+        </section>
+
+        <section class="panel wide">
+          <h2>4. Follow-up task</h2>
+          <form id="taskForm" class="form-grid">
+            <label>Job
+              <select name="job_id" id="taskJob" required>
+                <option value="">Create a job first</option>
+              </select>
+            </label>
+            <label>Task title <input name="title" required maxlength="200" placeholder="Call customer"></label>
+            <label>Due date (optional) <input name="due_at" type="datetime-local"></label>
+            <button type="submit">Add task</button>
+          </form>
+          <ul id="taskList" class="record-list"></ul>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer><p>TradeDesk by Pacctech LLC · Do not use with real customer data until security-reviewed.</p></footer>
+</body>
+</html>
