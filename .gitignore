@@ -1,15 +1,46 @@
+# Python
 __pycache__/
 *.py[cod]
-*.db
+*.egg-info/
+
+# Virtual environments
 .venv/
+.venv*/
 venv/
+
+# Environment files
 .env
+.env.*
+!.env.example
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Certificates and private keys
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+
+# Backups
+*.backup
+*.bak
+*.old
+
+# Testing and coverage
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Build artifacts
 dist/
 build/
-*.egg-info/
+
+# IDE and operating system files
 .idea/
 .vscode/
 .DS_Store
+Thumbs.db
