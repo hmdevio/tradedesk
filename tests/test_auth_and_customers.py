@@ -8,6 +8,8 @@ from starlette.requests import Request
 
 import app.rate_limit as rate_limit
 from app.config import get_settings
+from app.database import SessionLocal
+from app.models import AuthSession
 
 
 class FakeRedis:
@@ -155,3 +157,84 @@ def test_production_redis_requires_tls_and_authentication():
 def test_production_redis_rejects_disabled_certificate_validation():
     with pytest.raises(RuntimeError, match="certificate verification"):
         rate_limit._validate_production_redis_url("rediss://:password@redis.internal:6379/0?ssl_cert_reqs=none")
+
+
+
+def test_logout_revokes_only_the_current_session(account):
+    client = account["client"]
+    original_token = account["headers"]["Authorization"].split(" ", 1)[1]
+    second_login = client.post("/auth/login", json={
+        "email": "owner@example.com", "password": "a-long-test-password-123",
+    })
+    second_token = second_login.json()["access_token"]
+
+    logout_response = client.post("/auth/logout", headers=account["headers"])
+    assert logout_response.status_code == 204
+    assert client.get("/customers", headers=account["headers"]).status_code == 401
+    assert client.get("/customers", headers={
+        "Authorization": f"Bearer {second_token}",
+    }).status_code == 200
+
+
+def test_password_change_revokes_all_account_sessions(account):
+    client = account["client"]
+    second_login = client.post("/auth/login", json={
+        "email": "owner@example.com", "password": "a-long-test-password-123",
+    })
+    second_headers = {"Authorization": f"Bearer {second_login.json()['access_token']}"}
+
+    response = client.post("/auth/password", headers=account["headers"], json={
+        "current_password": "a-long-test-password-123",
+        "new_password": "a-new-long-password-456",
+    })
+    assert response.status_code == 204
+    assert client.get("/customers", headers=account["headers"]).status_code == 401
+    assert client.get("/customers", headers=second_headers).status_code == 401
+
+    login = client.post("/auth/login", json={
+        "email": "owner@example.com", "password": "a-new-long-password-456",
+    })
+    assert login.status_code == 200
+
+
+def test_password_change_rejects_wrong_current_password(account):
+    response = account["client"].post("/auth/password", headers=account["headers"], json={
+        "current_password": "incorrect-current-password",
+        "new_password": "a-new-long-password-456",
+    })
+    assert response.status_code == 400
+    assert account["client"].get("/customers", headers=account["headers"]).status_code == 200
+
+
+def test_session_expiration_is_enforced(account):
+    client = account["client"]
+    with SessionLocal() as db:
+        session = db.query(AuthSession).one()
+        from datetime import timedelta
+        session.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        db.commit()
+    assert client.get("/customers", headers=account["headers"]).status_code == 401
+
+
+def test_session_cannot_be_reassigned_to_another_user(account):
+    client = account["client"]
+    second = client.post("/auth/register", json={
+        "email": "session-other@example.com",
+        "password": "another-long-password-123",
+    })
+    second_user_id = int(jwt.decode(
+        second.json()["access_token"], get_settings().secret_key, algorithms=["HS256"]
+    )["sub"])
+    first_payload = jwt.decode(
+        account["headers"]["Authorization"].split(" ", 1)[1],
+        get_settings().secret_key,
+        algorithms=["HS256"],
+    )
+    forged = jwt.encode(
+        {**first_payload, "sub": str(second_user_id)},
+        get_settings().secret_key,
+        algorithm="HS256",
+    )
+    assert client.get("/customers", headers={
+        "Authorization": f"Bearer {forged}",
+    }).status_code == 401
