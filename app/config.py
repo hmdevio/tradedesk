@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./tradedesk.db"
     access_token_minutes: int = 30
     cors_origins: str = ""
+    redis_url: str = ""
+    trusted_proxy_cidrs: str = ""
 
     # PostgreSQL TLS/mTLS settings.
     database_sslmode: str = "verify-full"
