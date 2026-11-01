@@ -7,6 +7,8 @@ Security-oriented notes:
 """
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import hashlib
+import secrets
 from uuid import uuid4
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
@@ -21,15 +23,16 @@ from pwdlib import PasswordHash
 from app.config import get_settings
 from app.database import Base, engine, get_db
 from app.dependencies import get_current_session, get_current_user
-from app.models import AuthSession, Customer, Job, ServiceReport, Task, User, normalize_email
+from app.models import AuthSession, Customer, EmailVerificationToken, Job, ServiceReport, Task, User, normalize_email
 from app.reporting import create_pdf, make_report_draft
 from app.schemas import (
     CustomerCreate, CustomerOut, CustomerUpdate, JobCreate, JobOut, JobUpdate,
     ReportDraftRequest, ReportEdit, ReportOut, TaskCreate, TaskOut, TaskUpdate,
-    TokenResponse, UserCreate, UserLogin, PasswordChange,
+    TokenResponse, UserCreate, UserLogin, PasswordChange, EmailVerificationRequest, EmailRequest,
 )
 from app.security import create_access_token, hash_password, verify_password
 from app.rate_limit import enforce_rate_limit, verify_redis_connection
+from app.email_delivery import send_verification_email
 
 settings = get_settings()
 
@@ -127,7 +130,70 @@ def register(payload: UserCreate, request: Request, db: Session = Depends(get_db
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="Unable to create account with those details") from None
-    return issue_session(db, user)
+    user.email_verified = False
+    db.commit()
+    create_verification_token(db, user)
+    return Response(
+        content='{"message":"Account created. Check your email to verify your address before signing in."}',
+        status_code=status.HTTP_201_CREATED,
+        media_type="application/json",
+    )
+
+
+def create_verification_token(db: Session, user: User) -> None:
+    """Rotate outstanding tokens; persist only a digest of a high-entropy secret."""
+    now = datetime.now(timezone.utc)
+    db.query(EmailVerificationToken).filter(
+        EmailVerificationToken.user_id == user.id,
+        EmailVerificationToken.used_at.is_(None),
+    ).delete(synchronize_session=False)
+    raw_token = secrets.token_urlsafe(48)
+    token_digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    db.add(EmailVerificationToken(
+        user_id=user.id,
+        token_hash=token_digest,
+        expires_at=now + timedelta(minutes=settings.email_verification_minutes),
+        created_at=now,
+    ))
+    db.commit()
+    send_verification_email(user.email, raw_token)
+
+
+@app.post("/auth/verify-email")
+def verify_email(payload: EmailVerificationRequest, db: Session = Depends(get_db)):
+    """Consume one valid, unexpired verification token exactly once."""
+    digest = hashlib.sha256(payload.token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    record = db.scalar(select(EmailVerificationToken).where(
+        EmailVerificationToken.token_hash == digest,
+        EmailVerificationToken.used_at.is_(None),
+        EmailVerificationToken.expires_at > now,
+    ))
+    if record is None:
+        raise HTTPException(status_code=400, detail="Verification link is invalid or expired")
+    user = db.get(User, record.user_id)
+    if user is None:
+        raise HTTPException(status_code=400, detail="Verification link is invalid or expired")
+    record.used_at = now
+    user.email_verified = True
+    user.email_verified_at = now
+    db.query(EmailVerificationToken).filter(
+        EmailVerificationToken.user_id == user.id,
+        EmailVerificationToken.used_at.is_(None),
+    ).update({EmailVerificationToken.used_at: now}, synchronize_session=False)
+    db.commit()
+    return {"message": "Email verified. You can now sign in."}
+
+
+@app.post("/auth/resend-verification")
+def resend_verification(payload: EmailRequest, request: Request, db: Session = Depends(get_db)):
+    """Always return the same response to avoid revealing registered addresses."""
+    enforce_rate_limit(request, "email-verification", limit=3, window_seconds=3600)
+    email = normalize_email(str(payload.email))
+    user = db.scalar(select(User).where(func.lower(func.trim(User.email)) == email))
+    if user is not None and not user.email_verified:
+        create_verification_token(db, user)
+    return {"message": "If the account requires verification, an email will be sent."}
 
 
 @app.post("/auth/login", response_model=TokenResponse)
@@ -141,6 +207,8 @@ def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not user.email_verified:
+        raise HTTPException(status_code=403, detail="Verify your email address before signing in")
     return issue_session(db, user)
 
 
