@@ -1,7 +1,10 @@
-"""Password hashing and short-lived bearer-token utilities."""
-from datetime import datetime, timedelta, timezone
+"""Password hashing and short-lived, session-bound bearer tokens."""
+from datetime import datetime
+from uuid import UUID
+
 import jwt
 from pwdlib import PasswordHash
+
 from app.config import get_settings
 
 password_hasher = PasswordHash.recommended()
@@ -23,12 +26,12 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int) -> str:
-    """Create a signed token with a subject and expiry."""
-    now = datetime.now(timezone.utc)
+def create_access_token(user_id: int, session_id: str, expires_at: datetime) -> str:
+    """Create a JWT tied to a persisted, revocable server-side session."""
     payload = {
         "sub": str(user_id),
-        "iat": now,
-        "exp": now + timedelta(minutes=settings.access_token_minutes),
+        "jti": str(UUID(session_id)),
+        "iat": datetime.now(expires_at.tzinfo),
+        "exp": expires_at,
     }
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
