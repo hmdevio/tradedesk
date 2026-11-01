@@ -152,8 +152,6 @@ $("#customerForm").addEventListener("submit", async (event) => {
   }
 
   try {
-    console.log("[Customer] Sending request:", data);
-
     // Save the customer through the API.
     const customer = await api("/customers", {
       method: "POST",
@@ -247,9 +245,6 @@ $("#reportForm").addEventListener("submit", async (event) => {
         }),
       }
     );
-
-    console.log("[Report] Draft created:", report);
-
     // Update the active report.
     activeReportId = report.id;
 
