@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -27,16 +27,25 @@ from app.schemas import (
     TokenResponse, UserCreate, UserLogin,
 )
 from app.security import create_access_token, hash_password, verify_password
+from app.rate_limit import enforce_rate_limit, verify_redis_connection
 
 settings = get_settings()
-if settings.environment == "production" and settings.secret_key == "replace-with-a-long-random-secret-before-running":
-    raise RuntimeError("SECRET_KEY must be configured before production startup")
+
+if settings.environment == "production":
+    if len(settings.secret_key) < 32:
+        raise RuntimeError(
+            "SECRET_KEY must contain at least 32 characters in production"
+        )
 dummy_hasher = PasswordHash.recommended()
+# Compute once at startup; do not spend extra Argon2 work for every unknown email.
+DUMMY_PASSWORD_HASH = dummy_hasher.hash("not-a-real-user-password")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create tables for the capstone starter. Use Alembic migrations in production."""
+    if settings.environment == "production":
+        verify_redis_connection()
     Base.metadata.create_all(bind=engine)
     yield
 
@@ -79,7 +88,8 @@ def health() -> dict[str, str]:
 
 
 @app.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenResponse:
+def register(payload: UserCreate, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    enforce_rate_limit(request, "register", limit=3, window_seconds=3600)
     email = normalize_email(str(payload.email))
     existing = db.scalar(select(User).where(func.lower(func.trim(User.email)) == email))
     if existing:
@@ -98,13 +108,13 @@ def register(payload: UserCreate, db: Session = Depends(get_db)) -> TokenRespons
 
 
 @app.post("/auth/login", response_model=TokenResponse)
-def login(payload: UserLogin, db: Session = Depends(get_db)) -> TokenResponse:
+def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
+    enforce_rate_limit(request, "login", limit=5, window_seconds=900)
     email = normalize_email(str(payload.email))
     user = db.scalar(select(User).where(func.lower(func.trim(User.email)) == email))
     # Verify a dummy hash for unknown emails to reduce obvious timing differences.
     if user is None:
-        dummy_hash = dummy_hasher.hash("not-a-real-user-password")
-        verify_password(payload.password, dummy_hash)
+        verify_password(payload.password, DUMMY_PASSWORD_HASH)
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
