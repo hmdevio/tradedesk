@@ -21,9 +21,6 @@ elif settings.database_url.startswith(("postgresql://", "postgresql+")):
         "sslrootcert": settings.database_sslrootcert,
         "sslcert": settings.database_sslcert,
         "sslkey": settings.database_sslkey,
-        # Existing PostgreSQL application tables live in the tradedesk schema.
-        # Keep unqualified ORM queries pointed there instead of public.
-        "options": "-csearch_path=tradedesk,public",
     }
 
     missing = [
@@ -53,6 +50,8 @@ elif settings.database_url.startswith(("postgresql://", "postgresql+")):
         "sslrootcert": settings.database_sslrootcert,
         "sslcert": settings.database_sslcert,
         "sslkey": settings.database_sslkey,
+        # Existing PostgreSQL application tables live in tradedesk, not public.
+        "options": "-csearch_path=tradedesk,public",
     }
 
 else:
