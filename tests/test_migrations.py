@@ -11,7 +11,9 @@ ALEMBIC_INI = ROOT / "alembic.ini"
 
 
 def _config():
-    return Config(str(ALEMBIC_INI))
+    config = Config(str(ALEMBIC_INI))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    return config
 
 
 def test_auth_sessions_upgrade_and_downgrade(tmp_path):
