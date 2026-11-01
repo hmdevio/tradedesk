@@ -137,7 +137,11 @@ def test_invalid_jwt_is_rejected(client, token_kind):
     else:
         now = datetime.now(timezone.utc)
         payload = {"sub": "1", "iat": now - timedelta(hours=2), "exp": now - timedelta(hours=1)} if token_kind == "expired" else {"sub": "1", "iat": now, "exp": now + timedelta(minutes=5)}
-        key = "wrong-signing-key" if token_kind == "invalid_signature" else settings.secret_key
+        key = (
+            "wrong-signing-key-for-test-only-32-bytes-minimum"
+            if token_kind == "invalid_signature"
+            else settings.secret_key
+        )
         token = jwt.encode(payload, key, algorithm="HS256")
     response = client.get("/customers", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401

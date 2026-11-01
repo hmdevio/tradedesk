@@ -30,8 +30,12 @@ from app.security import create_access_token, hash_password, verify_password
 from app.rate_limit import enforce_rate_limit, verify_redis_connection
 
 settings = get_settings()
-if settings.environment == "production" and settings.secret_key == "replace-with-a-long-random-secret-before-running":
-    raise RuntimeError("SECRET_KEY must be configured before production startup")
+
+if settings.environment == "production":
+    if len(settings.secret_key) < 32:
+        raise RuntimeError(
+            "SECRET_KEY must contain at least 32 characters in production"
+        )
 dummy_hasher = PasswordHash.recommended()
 # Compute once at startup; do not spend extra Argon2 work for every unknown email.
 DUMMY_PASSWORD_HASH = dummy_hasher.hash("not-a-real-user-password")
