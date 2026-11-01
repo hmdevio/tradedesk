@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     redis_url: str = ""
     trusted_proxy_cidrs: str = ""
 
+    app_base_url: str = "http://localhost:8000"
+    email_verification_minutes: int = 30
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_starttls: bool = True
+    smtp_use_ssl: bool = False
+
     # PostgreSQL TLS/mTLS settings.
     database_sslmode: str = "verify-full"
     database_sslrootcert: str = ""
