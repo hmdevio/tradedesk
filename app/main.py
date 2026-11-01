@@ -6,25 +6,27 @@ Security-oriented notes:
 - AI-generated text remains a draft until an explicit approval action.
 """
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from pwdlib import PasswordHash
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
-from app.dependencies import get_current_user
-from app.models import Customer, Job, ServiceReport, Task, User, normalize_email
+from app.dependencies import get_current_session, get_current_user
+from app.models import AuthSession, Customer, Job, ServiceReport, Task, User, normalize_email
 from app.reporting import create_pdf, make_report_draft
 from app.schemas import (
     CustomerCreate, CustomerOut, CustomerUpdate, JobCreate, JobOut, JobUpdate,
     ReportDraftRequest, ReportEdit, ReportOut, TaskCreate, TaskOut, TaskUpdate,
-    TokenResponse, UserCreate, UserLogin,
+    TokenResponse, UserCreate, UserLogin, PasswordChange,
 )
 from app.security import create_access_token, hash_password, verify_password
 from app.rate_limit import enforce_rate_limit, verify_redis_connection
@@ -43,10 +45,11 @@ DUMMY_PASSWORD_HASH = dummy_hasher.hash("not-a-real-user-password")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables for the capstone starter. Use Alembic migrations in production."""
+    """Initialize development schema; production schema is managed by Alembic."""
     if settings.environment == "production":
         verify_redis_connection()
-    Base.metadata.create_all(bind=engine)
+    else:
+        Base.metadata.create_all(bind=engine)
     yield
 
 
@@ -87,6 +90,27 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def issue_session(db: Session, user: User) -> TokenResponse:
+    """Persist a revocable session before returning its signed bearer token."""
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(minutes=settings.access_token_minutes)
+    session = AuthSession(
+        id=str(uuid4()),
+        user_id=user.id,
+        expires_at=expires_at,
+        created_at=now,
+    )
+    db.add(session)
+    # Remove expired records opportunistically; revoked records remain until expiry.
+    db.execute(delete(AuthSession).where(AuthSession.expires_at <= now))
+    db.commit()
+    token = create_access_token(user.id, session.id, expires_at)
+    return TokenResponse(
+        access_token=token,
+        expires_in_seconds=settings.access_token_minutes * 60,
+    )
+
+
 @app.post("/auth/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, request: Request, db: Session = Depends(get_db)) -> TokenResponse:
     enforce_rate_limit(request, "register", limit=3, window_seconds=3600)
@@ -103,8 +127,7 @@ def register(payload: UserCreate, request: Request, db: Session = Depends(get_db
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="Unable to create account with those details") from None
-    token = create_access_token(user.id)
-    return TokenResponse(access_token=token, expires_in_seconds=settings.access_token_minutes * 60)
+    return issue_session(db, user)
 
 
 @app.post("/auth/login", response_model=TokenResponse)
@@ -118,10 +141,37 @@ def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
-    return TokenResponse(
-        access_token=create_access_token(user.id),
-        expires_in_seconds=settings.access_token_minutes * 60,
-    )
+    return issue_session(db, user)
+
+
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    auth_session: AuthSession = Depends(get_current_session),
+    db: Session = Depends(get_db),
+):
+    """Revoke only the bearer token presented to this endpoint."""
+    auth_session.revoked_at = datetime.now(timezone.utc)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post("/auth/password", status_code=status.HTTP_204_NO_CONTENT)
+def change_password(
+    payload: PasswordChange,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Change the password and revoke all active sessions for the account."""
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    now = datetime.now(timezone.utc)
+    user.password_hash = hash_password(payload.new_password)
+    db.query(AuthSession).filter(
+        AuthSession.user_id == user.id,
+        AuthSession.revoked_at.is_(None),
+    ).update({AuthSession.revoked_at: now}, synchronize_session=False)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def owned_customer(db: Session, customer_id: int, user_id: int) -> Customer:

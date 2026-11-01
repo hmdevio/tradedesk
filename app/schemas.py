@@ -28,6 +28,11 @@ class TokenResponse(BaseModel):
     expires_in_seconds: int
 
 
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 class CustomerCreate(BaseModel):
     name: ShortText
     phone: str | None = Field(default=None, max_length=40)

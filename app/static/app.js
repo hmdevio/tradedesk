@@ -124,7 +124,12 @@ $("#authForm").addEventListener("submit", async (event) => {
   } catch (error) { showNotice(error.message, "error"); }
 });
 
-$("#logoutButton").addEventListener("click", () => {
+$("#logoutButton").addEventListener("click", async () => {
+  try {
+    if (accessToken) await api("/auth/logout", { method: "POST" });
+  } catch (error) {
+    showNotice("Server sign-out could not be confirmed. Clearing this browser session.", "error");
+  }
   accessToken = null;
   customers = [];
   jobs = [];
