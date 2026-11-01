@@ -45,10 +45,11 @@ DUMMY_PASSWORD_HASH = dummy_hasher.hash("not-a-real-user-password")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables for the capstone starter. Use Alembic migrations in production."""
+    """Initialize development schema; production schema is managed by Alembic."""
     if settings.environment == "production":
         verify_redis_connection()
-    Base.metadata.create_all(bind=engine)
+    else:
+        Base.metadata.create_all(bind=engine)
     yield
 
 
