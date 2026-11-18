@@ -63,17 +63,23 @@ def _client_key_digest(client_address: str) -> str:
     return hmac.new(secret, client_address.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _is_production(settings) -> bool:
+    # Match app/main.py and app/config.py: "Production " counts as production
+    # (re-audit finding S8). An exact comparison let rate limiting fail open.
+    return settings.environment.strip().lower() == "production"
+
+
 def enforce_rate_limit(request: Request, bucket: str, limit: int, window_seconds: int) -> None:
     settings = get_settings()
     if not settings.redis_url:
-        if settings.environment == "production":
+        if _is_production(settings):
             raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable")
         return
     key = f"tradedesk:rate-limit:{bucket}:{_client_key_digest(client_ip(request))}"
     try:
         count, ttl = get_redis_client().eval(_INCREMENT_WITH_TTL, 1, key, window_seconds)
     except Exception:
-        if settings.environment == "production":
+        if _is_production(settings):
             raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable") from None
         return
     if int(count) > limit:

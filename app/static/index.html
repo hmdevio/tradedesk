@@ -19,19 +19,58 @@
   </header>
 
   <main>
+    <div id="sessionBanner" class="session-banner hidden" role="alert">
+      <span id="sessionBannerText">Your session ends in 2 minutes.</span>
+      <button id="staySignedInButton" type="button">Stay signed in</button>
+    </div>
+
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
 
-    <section id="authPanel" class="panel">
+    <section id="authPanel" class="panel narrow">
       <h2>Sign in or create an account</h2>
-      <p class="muted">Use a unique test account. Never enter a password you use elsewhere.</p>
       <form id="authForm" class="form-grid">
         <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320"></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required></label>
+        <p class="muted">Passwords are at least 12 characters.</p>
         <div class="button-row">
           <button type="submit" data-mode="login">Sign in</button>
           <button type="submit" class="secondary" data-mode="register">Create account</button>
         </div>
+        <button id="forgotPasswordLink" type="button" class="link-button">Forgot password?</button>
       </form>
+    </section>
+
+    <section id="verificationPanel" class="panel narrow hidden">
+      <h2>Verify your email</h2>
+      <p id="verificationMessage" class="muted">
+        Check your email for a verification link before signing in.
+      </p>
+      <form id="resendVerificationForm" class="form-grid">
+        <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320"></label>
+        <button type="submit">Resend verification email</button>
+      </form>
+      <button type="button" class="link-button back-to-sign-in">Back to sign in</button>
+    </section>
+
+    <section id="forgotPanel" class="panel narrow hidden">
+      <h2>Reset your password</h2>
+      <p class="muted">Enter your account email. If it matches an account, we'll send a link to choose a new password.</p>
+      <form id="forgotForm" class="form-grid">
+        <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320"></label>
+        <button type="submit">Send reset link</button>
+      </form>
+      <button type="button" class="link-button back-to-sign-in">Back to sign in</button>
+    </section>
+
+    <section id="resetPanel" class="panel narrow hidden">
+      <h2>Choose a new password</h2>
+      <form id="resetForm" class="form-grid">
+        <label>New password <input name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+        <label>Confirm new password <input name="confirm_password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required></label>
+        <p class="muted">At least 12 characters. Signing in elsewhere will end after the change.</p>
+        <button type="submit">Update password</button>
+      </form>
+      <button type="button" class="link-button back-to-sign-in">Back to sign in</button>
     </section>
 
     <section id="appPanel" class="hidden">
@@ -41,7 +80,7 @@
           <form id="customerForm" class="form-grid">
             <label>Name <input name="name" required maxlength="120"></label>
             <label>Email <input name="email" type="email" maxlength="320"></label>
-            <label>Phone <input name="phone" maxlength="40"></label>
+            <label>Phone <input name="phone" type="tel" maxlength="40"></label>
             <label>Address <input name="address" maxlength="300"></label>
             <button type="submit">Save customer</button>
           </form>
@@ -57,7 +96,7 @@
                 <option value="">Create a customer first</option>
               </select>
             </label>
-            <label>Job title <input name="title" required maxlength="200"></label>
+            <label>Job title <input name="title" required maxlength="160"></label>
             <label>Trade type <input name="trade_type" required maxlength="80" placeholder="Plumbing, HVAC, etc."></label>
             <label>Description <textarea name="description" maxlength="4000" rows="2"></textarea></label>
             <label>Job notes <textarea name="notes" maxlength="10000" rows="3"></textarea></label>
@@ -80,17 +119,33 @@
             </label>
             <button type="submit">Generate report draft</button>
           </form>
+
+          <h3>Reports for this job</h3>
+          <ul id="reportHistory" class="record-list"></ul>
+
           <div id="reportArea" class="report-area hidden">
-            <p><strong>Report status:</strong> <span id="reportStatus">Draft</span></p>
-            <label>Report content (review and edit before approval)
-              <textarea id="reportContent" rows="8" maxlength="10000"></textarea>
-            </label>
+            <p><strong>Report <span id="reportNumber"></span> status:</strong> <span id="reportStatus">Draft</span></p>
+            <p id="reportGuidance" class="muted">Review each section. Leave a section blank to leave it off the PDF.</p>
+            <div class="form-grid">
+              <label>Work performed
+                <textarea id="section_work_performed" data-section="work_performed" rows="5" maxlength="5000"></textarea>
+              </label>
+              <label>Findings and observations
+                <textarea id="section_findings_observations" data-section="findings_observations" rows="3" maxlength="5000" placeholder="Not specified. Leave blank to omit."></textarea>
+              </label>
+              <label>Recommendations
+                <textarea id="section_recommendations" data-section="recommendations" rows="3" maxlength="5000" placeholder="Not specified. Leave blank to omit."></textarea>
+              </label>
+              <label>Suggested follow-up
+                <textarea id="section_suggested_follow_up" data-section="suggested_follow_up" rows="3" maxlength="5000" placeholder="Not specified. Leave blank to omit."></textarea>
+              </label>
+            </div>
             <div class="button-row">
               <button id="saveReportButton" type="button">Save edits</button>
               <button id="approveReportButton" type="button">Approve report</button>
               <button id="pdfButton" type="button" class="secondary">Download approved PDF</button>
             </div>
-            <p class="muted">The local fallback is a formatter, not a real AI model. It does not send notes to an external service.</p>
+            <p class="muted">Drafts are organized from your notes on this server. Notes are not sent to an external service.</p>
           </div>
         </section>
 
@@ -112,6 +167,6 @@
     </section>
   </main>
 
-  <footer><p>TradeDesk by Pacctech LLC · Do not use with real customer data until security-reviewed.</p></footer>
+  <footer><p>TradeDesk by Pacctech LLC</p></footer>
 </body>
 </html>

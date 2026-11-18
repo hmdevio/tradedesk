@@ -35,6 +35,10 @@ button.secondary:hover { background: #dce4ec; }
 .button-row { display: flex; gap: .65rem; flex-wrap: wrap; }
 .muted { color: var(--muted); font-size: .9rem; }
 .notice { margin-bottom: 1rem; border-radius: 8px; padding: .7rem 1rem; }
+/* Pinned to the top while scrolling so results of forms lower on the page
+   are visible, especially on phones (audit U8). */
+.notice { position: sticky; top: .5rem; z-index: 20; box-shadow: 0 2px 8px rgba(16, 42, 67, .15); }
+[aria-busy="true"] button:disabled, button[aria-busy="true"]:disabled { cursor: progress; }
 .notice:empty { display: none; }
 .notice.error { background: #fee2e2; color: #7f1d1d; }
 .notice.success { background: #dcfce7; color: #14532d; }
@@ -43,4 +47,11 @@ button.secondary:hover { background: #dce4ec; }
 .report-area { margin-top: 1.25rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .hidden { display: none !important; }
 footer { text-align: center; color: var(--muted); padding: 1rem; font-size: .85rem; }
+textarea[readonly] { background: var(--wash); color: var(--muted); }
+button:disabled { opacity: .55; cursor: not-allowed; }
+.narrow { max-width: 520px; margin: 0 auto 1rem; }
+.link-button { background: none; color: var(--accent); padding: .25rem 0; font-weight: 600; text-decoration: underline; justify-self: start; }
+.link-button:hover { background: none; color: var(--accent-dark); }
+.session-banner { display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 1rem; border-radius: 8px; padding: .7rem 1rem; background: #fef3c7; color: #78350f; }
+.record-row { display: flex; gap: .75rem; justify-content: space-between; align-items: center; flex-wrap: wrap; }
 @media (max-width: 760px) { .dashboard-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .topbar { align-items: flex-start; } }

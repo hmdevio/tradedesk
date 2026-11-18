@@ -74,14 +74,29 @@ def test_task_lifecycle(account):
     assert updated.json()["status"] == "Completed"
 
 
-def test_task_cannot_be_seen_or_changed_by_another_user(account):
+def test_task_cannot_be_seen_or_changed_by_another_user(
+    account,
+    register_verified_user,
+):
     client, headers = account["client"], account["headers"]
+
     job_id = setup_job(client, headers)
-    task = client.post(f"/jobs/{job_id}/tasks", headers=headers, json={"title": "Private follow-up"}).json()
-    second = client.post("/auth/register", json={
-        "email": "third@example.com",
-        "password": "another-long-password-789",
-    })
-    other_headers = {"Authorization": f"Bearer {second.json()['access_token']}"}
-    response = client.patch(f"/tasks/{task['id']}", headers=other_headers, json={"status": "Completed"})
+    task = client.post(
+        f"/jobs/{job_id}/tasks",
+        headers=headers,
+        json={"title": "Private follow-up"},
+    ).json()
+
+    other = register_verified_user(
+        "third@example.com",
+        "another-long-password-789",
+    )
+    other_headers = other["headers"]
+
+    response = client.patch(
+        f"/tasks/{task['id']}",
+        headers=other_headers,
+        json={"status": "Completed"},
+    )
+
     assert response.status_code == 404
