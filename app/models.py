@@ -1,9 +1,23 @@
-"""SQLAlchemy models. Ownership columns are used by authorization checks."""
-from datetime import datetime, timezone
-from sqlalchemy import ( Boolean, DateTime, ForeignKey, Integer, String, Text, Index, text, )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
-from app.database import Base
 
+"""SQLAlchemy models. Ownership columns are used by authorization checks."""
+
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    Index,
+    UniqueConstraint,
+    false,
+    text,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.database import Base
 
 
 def utc_now() -> datetime:
@@ -13,40 +27,128 @@ def utc_now() -> datetime:
 
 class User(Base):
     __tablename__ = "users"
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    email_verified: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("1"), nullable=False)
-    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    customers: Mapped[list["Customer"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
-    jobs: Mapped[list["Job"]] = relationship(back_populates="owner", cascade="all, delete-orphan")
 
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(
+        String(320), unique=True, index=True, nullable=False
+    )
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    # New accounts must be unverified until their email token is consumed.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    customers: Mapped[list["Customer"]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan"
+    )
+    jobs: Mapped[list["Job"]] = relationship(
+        back_populates="owner", cascade="all, delete-orphan"
+    )
 
 
 class AuthSession(Base):
     """Server-side record for one revocable bearer-token session."""
 
     __tablename__ = "auth_sessions"
-    __table_args__ = (Index("ix_auth_sessions_user_expiry", "user_id", "expires_at"),)
+
+    __table_args__ = (
+        Index("ix_auth_sessions_user_expiry", "user_id", "expires_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class EmailVerificationToken(Base):
     """Hashed, expiring, single-use email verification token."""
+
     __tablename__ = "email_verification_tokens"
-    __table_args__ = (Index("ix_email_verification_tokens_user_expiry", "user_id", "expires_at"),)
+
+    __table_args__ = (
+        Index(
+            "ix_email_verification_tokens_user_expiry",
+            "user_id",
+            "expires_at",
+        ),
+    )
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False, index=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class PasswordResetToken(Base):
+    """Hashed, expiring, single-use password reset token."""
+
+    __tablename__ = "password_reset_tokens"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "token_hash",
+            name="uq_password_reset_tokens_token_hash",
+        ),
+        Index(
+            "ix_password_reset_tokens_user_expiry",
+            "user_id",
+            "expires_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class Customer(Base):
@@ -58,6 +160,22 @@ class Customer(Base):
         index=True,
         nullable=False,
     )
+
+    __table_args__ = (
+        Index(
+            "uq_customers_user_email_normalized",
+            "user_id",
+            text("lower(trim(email))"),
+            unique=True,
+            postgresql_where=text(
+                "email IS NOT NULL AND trim(email) <> ''"
+            ),
+            sqlite_where=text(
+                "email IS NOT NULL AND trim(email) <> ''"
+            ),
+        ),
+    )
+
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
@@ -143,13 +261,27 @@ class Job(Base):
 
 class ServiceReport(Base):
     __tablename__ = "service_reports"
+
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    job_id: Mapped[int] = mapped_column(ForeignKey("jobs.id", ondelete="CASCADE"), index=True, nullable=False)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
     original_notes: Mapped[str] = mapped_column(Text, nullable=False)
     generated_content: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="Draft", nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), default="Draft", nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
     job: Mapped[Job] = relationship(back_populates="reports")
 
 

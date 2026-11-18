@@ -26,6 +26,8 @@ venv/
 *.crt
 
 # Backups
+*.sql
+*.dump
 *.backup
 *.bak
 *.old
