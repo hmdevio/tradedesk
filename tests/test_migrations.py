@@ -1067,3 +1067,49 @@ def test_trade_worksheet_migration_upgrade_and_downgrade(tmp_path):
 
     finally:
         test_engine.dispose()
+
+
+def test_business_profile_migration_upgrade_and_downgrade(tmp_path):
+    """business_profiles is created at head and removed on downgrade."""
+    database = tmp_path / "profile-migration.db"
+    test_engine = create_engine(f"sqlite:///{database}")
+
+    try:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE users (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    email VARCHAR(320) NOT NULL UNIQUE,
+                    password_hash VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            _create_legacy_customers_table(connection)
+
+            config = _config()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+
+            inspector = inspect(connection)
+            assert {c["name"] for c in inspector.get_columns("business_profiles")} == {
+                "id", "user_id", "business_name", "phone", "email", "address",
+                "license_number", "logo", "logo_content_type", "updated_at",
+            }
+            assert any(
+                fk["referred_table"] == "users"
+                and fk["options"].get("ondelete") == "CASCADE"
+                for fk in inspector.get_foreign_keys("business_profiles")
+            )
+            assert any(
+                uc["column_names"] == ["user_id"]
+                for uc in inspector.get_unique_constraints("business_profiles")
+            )
+
+            command.downgrade(config, "20261118_02")
+            remaining = set(inspect(connection).get_table_names())
+            assert "business_profiles" not in remaining
+            assert "job_worksheets" in remaining
+    finally:
+        test_engine.dispose()

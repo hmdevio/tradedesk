@@ -65,3 +65,32 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .sketch-card { border: 1px solid #d7dde3; border-radius: 8px; padding: .6rem; background: #fff; display: grid; gap: .4rem; }
 .sketch-card img { width: 100%; height: 150px; object-fit: contain; background: #f3f6f8; border-radius: 4px; }
 .sketch-card .tag { font-size: .8rem; color: #14532d; }
+
+/* Edit, delete and status controls (Sprint 1 / U5) */
+.record-row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; justify-content: space-between; }
+.record-text { flex: 1 1 14rem; }
+.record-actions { display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; }
+.record-actions button, .record-actions select { padding: .4rem .7rem; font-size: .9rem; }
+.record-actions select { width: auto; }
+button.danger { background: #fff; color: #9f1239; border: 1px solid #fda4af; }
+button.danger:hover { background: #fff1f2; }
+.inline-editor { display: grid; gap: .5rem; }
+.inline-editor .button-row button { padding: .45rem .8rem; }
+.status-pill { display: inline-block; font-size: .8rem; padding: .1rem .5rem; border-radius: 999px; background: #e8edf2; margin-left: .3rem; }
+.status-pill.Completed { background: #dcfce7; color: #14532d; }
+.status-pill.Cancelled { background: #f1f5f9; color: #475569; text-decoration: line-through; }
+.status-pill.In-Progress { background: #dbeafe; color: #1e3a8a; }
+.record-list li.overdue { border-color: #fda4af; background: #fff1f2; }
+.record-list li.done .record-text { color: #64748b; text-decoration: line-through; }
+.inline-filter { display: flex; gap: .5rem; align-items: center; margin-bottom: .25rem; }
+
+/* Business profile (Sprint 1) */
+#profilePanel summary { cursor: pointer; list-style: none; display: flex; flex-wrap: wrap; gap: .25rem .75rem; align-items: baseline; }
+#profilePanel summary::-webkit-details-marker { display: none; }
+#profilePanel summary h2 { display: inline; margin: 0; }
+#profilePanel summary::before { content: "▸"; color: #64748b; }
+#profilePanel[open] summary::before { content: "▾"; }
+#profilePanel[open] summary { margin-bottom: 1rem; }
+#profileForm .full { grid-column: 1 / -1; }
+.logo-row { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-top: 1rem; }
+.logo-preview { max-height: 80px; max-width: 240px; object-fit: contain; border: 1px solid var(--line); border-radius: 6px; padding: .25rem; background: #fff; }

@@ -210,6 +210,7 @@ function clearAccountUi() {
   }
   clearWorksheetUi();
   resetSelect($("#worksheetJob"), "Create a job first");
+  clearProfileUi();
   resetSelect($("#jobCustomer"), "Create a customer first");
   resetSelect($("#reportJob"), "Create a job first");
   resetSelect($("#taskJob"), "Create a job first");
@@ -414,11 +415,154 @@ async function refreshCustomers() {
   select.replaceChildren();
   if (!customers.length) addOption(select, "", "Create a customer first");
   for (const customer of customers) {
-    const li = document.createElement("li");
-    li.textContent = `${customer.name}${customer.email ? " · " + customer.email : ""}`;
-    $("#customerList").append(li);
+    $("#customerList").append(customerRow(customer));
     addOption(select, customer.id, customer.name);
   }
+}
+
+function customerRow(customer) {
+  const details = [customer.email, customer.phone, customer.address].filter(Boolean).join(" · ");
+  const li = recordRow(details ? `${customer.name} · ${details}` : customer.name, [
+    actionButton("Edit", "secondary", `Edit customer ${customer.name}`, () => {
+      inlineEditor(li, [
+        { name: "name", label: "Name", required: true, maxLength: 120 },
+        { name: "phone", label: "Phone", maxLength: 40 },
+        { name: "email", label: "Email", type: "email", maxLength: 320 },
+        { name: "address", label: "Address", type: "textarea", maxLength: 300 },
+      ], customer, async (values) => {
+        await api(`/customers/${encodeURIComponent(customer.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: values.name,
+            phone: values.phone,
+            // A blank email clears it; "" is not a valid address.
+            email: values.email || null,
+            address: values.address,
+          }),
+        });
+        await refreshAfterChange();
+        showNotice("Customer updated.");
+      });
+    }),
+    actionButton("Delete", "danger", `Delete customer ${customer.name}`, async () => {
+      const impact = await api(`/customers/${encodeURIComponent(customer.id)}/impact`);
+      if (impact.approved_reports) {
+        showNotice(`${customer.name} has approved reports, so the customer can't be deleted. Mark their jobs Completed or Cancelled instead.`, "error");
+        return;
+      }
+      if (!window.confirm(`Delete ${customer.name}?${impactText(impact)}\n\nThis can't be undone.`)) return;
+      await api(`/customers/${encodeURIComponent(customer.id)}`, { method: "DELETE" });
+      await refreshAfterChange();
+      showNotice("Customer deleted.");
+    }),
+  ]);
+  return li;
+}
+
+function impactText(impact) {
+  const parts = [];
+  const add = (count, one, many) => { if (count) parts.push(`${count} ${count === 1 ? one : many}`); };
+  add(impact.jobs, "job", "jobs");
+  add(impact.reports, "draft report", "draft reports");
+  add(impact.tasks, "task", "tasks");
+  add(impact.sketches, "sketch", "sketches");
+  return parts.length ? `\n\nThis also deletes ${parts.join(", ")}.` : "";
+}
+
+// Shared pieces for editable list rows (Sprint 1 / U5).
+function recordRow(text, actions) {
+  const li = document.createElement("li");
+  const row = document.createElement("div");
+  row.className = "record-row";
+  const label = document.createElement("span");
+  label.className = "record-text";
+  label.textContent = text;
+  const group = document.createElement("span");
+  group.className = "record-actions";
+  group.append(...actions);
+  row.append(label, group);
+  li.append(row);
+  return li;
+}
+
+function actionButton(text, className, ariaLabel, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = className;
+  button.textContent = text;
+  button.setAttribute("aria-label", ariaLabel);
+  button.addEventListener("click", guarded(async () => {
+    try { await handler(); }
+    catch (error) { reportError(error, `Unable to ${text.toLowerCase()}.`); }
+  }));
+  return button;
+}
+
+// Replaces a row's content with a small form; Save calls onSave(values),
+// Cancel (or Escape) restores the row by re-rendering the lists.
+function inlineEditor(li, fields, initial, onSave) {
+  const form = document.createElement("form");
+  form.className = "inline-editor";
+  for (const field of fields) {
+    const label = document.createElement("label");
+    label.textContent = field.label + " ";
+    const input = document.createElement(field.type === "textarea" ? "textarea" : "input");
+    if (field.type && field.type !== "textarea") input.type = field.type;
+    if (field.type === "textarea") input.rows = 2;
+    input.name = field.name;
+    if (field.maxLength) input.maxLength = field.maxLength;
+    input.required = Boolean(field.required);
+    const value = initial[field.name];
+    input.value = field.toInput ? field.toInput(value) : (value ?? "");
+    label.append(input);
+    form.append(label);
+  }
+  const buttons = document.createElement("div");
+  buttons.className = "button-row";
+  const save = document.createElement("button");
+  save.type = "submit";
+  save.textContent = "Save";
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  buttons.append(save, cancel);
+  form.append(buttons);
+
+  const restore = () => refreshAfterChange().catch((error) => reportError(error, "Unable to refresh."));
+  cancel.addEventListener("click", restore);
+  form.addEventListener("keydown", (event) => { if (event.key === "Escape") restore(); });
+  form.addEventListener("submit", guarded(async (event) => {
+    event.preventDefault();
+    const values = {};
+    for (const field of fields) {
+      const raw = form.elements[field.name].value.trim();
+      values[field.name] = field.fromInput ? field.fromInput(raw) : raw;
+    }
+    try { await onSave(values); }
+    catch (error) { reportError(error, "Unable to save changes."); }
+  }));
+  li.replaceChildren(form);
+  form.elements[fields[0].name].focus();
+}
+
+// Reload lists after an edit or delete, keeping each panel's selection when
+// it still exists; panels whose job disappeared are reset.
+async function refreshAfterChange() {
+  const before = {
+    report: $("#reportJob").value,
+    task: $("#taskJob").value,
+    worksheet: $("#worksheetJob").value,
+  };
+  await refreshCustomers();
+  await refreshJobs();
+  if (activeReport && !jobs.some((job) => job.id === activeReport.job_id)) {
+    activeReport = null;
+    $("#reportArea").classList.add("hidden");
+  }
+  await refreshReportHistory($("#reportJob").value);
+  await refreshTasks($("#taskJob").value);
+  if ($("#worksheetJob").value !== before.worksheet) await loadWorksheet($("#worksheetJob").value);
 }
 
 // Jobs are labelled with their customer (re-audit U-N3): two customers can
@@ -443,13 +587,80 @@ async function refreshJobs() {
     for (const job of jobs) addOption(select, job.id, jobLabel(job));
     if (jobs.some((job) => String(job.id) === previous)) select.value = previous;
   }
-  $("#jobList").replaceChildren();
-  for (const job of jobs) {
-    const li = document.createElement("li");
-    li.textContent = `${jobLabel(job)} · ${job.trade_type} · ${job.status}`;
-    $("#jobList").append(li);
-  }
+  renderJobList();
 }
+
+const JOB_STATUSES = ["New", "In Progress", "Completed", "Cancelled"];
+
+function renderJobList() {
+  const filter = $("#jobFilter").value;
+  const shown = jobs.filter((job) => filter === "all"
+    || (filter === "open" ? ["New", "In Progress"].includes(job.status) : job.status === filter));
+  const list = $("#jobList");
+  list.replaceChildren();
+  if (!shown.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = jobs.length ? "No jobs match this filter." : "No jobs yet.";
+    list.append(empty);
+    return;
+  }
+  for (const job of shown) list.append(jobRow(job));
+}
+
+function jobRow(job) {
+  const status = document.createElement("select");
+  status.setAttribute("aria-label", `Status of ${job.title}`);
+  for (const value of JOB_STATUSES) addOption(status, value, value);
+  status.value = job.status;
+  status.addEventListener("change", guarded(async () => {
+    try {
+      await api(`/jobs/${encodeURIComponent(job.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: status.value }),
+      });
+      job.status = status.value;
+      renderJobList();
+      showNotice(`"${job.title}" is now ${status.value}.`);
+    } catch (error) {
+      status.value = job.status;
+      reportError(error, "Unable to change the status.");
+    }
+  }));
+
+  const li = recordRow(`${jobLabel(job)} · ${job.trade_type}`, [
+    status,
+    actionButton("Edit", "secondary", `Edit job ${job.title}`, () => {
+      inlineEditor(li, [
+        { name: "title", label: "Job title", required: true, maxLength: 160 },
+        { name: "trade_type", label: "Trade type", required: true, maxLength: 80 },
+        { name: "description", label: "Description", type: "textarea", maxLength: 4000 },
+      ], job, async (values) => {
+        await api(`/jobs/${encodeURIComponent(job.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify(values),
+        });
+        await refreshAfterChange();
+        showNotice("Job updated.");
+      });
+    }),
+    actionButton("Delete", "danger", `Delete job ${job.title}`, async () => {
+      const impact = await api(`/jobs/${encodeURIComponent(job.id)}/impact`);
+      if (impact.approved_reports) {
+        showNotice(`"${job.title}" has approved reports, so it can't be deleted. Mark it Completed or Cancelled instead.`, "error");
+        return;
+      }
+      const extra = impactText({ ...impact, jobs: 0 });
+      if (!window.confirm(`Delete the job "${job.title}"?${extra}\n\nThis can't be undone.`)) return;
+      await api(`/jobs/${encodeURIComponent(job.id)}`, { method: "DELETE" });
+      await refreshAfterChange();
+      showNotice("Job deleted.");
+    }),
+  ]);
+  return li;
+}
+
+$("#jobFilter").addEventListener("change", renderJobList);
 
 async function refreshAll() {
   await refreshCustomers();
@@ -458,6 +669,7 @@ async function refreshAll() {
   await refreshTasks($("#taskJob").value);
   await loadWorksheetTemplates();
   await loadWorksheet($("#worksheetJob").value);
+  await loadProfile();
 }
 
 $("#customerForm").addEventListener("submit", guarded(async (event) => {
@@ -714,31 +926,70 @@ async function refreshTasks(jobId) {
   $("#taskList").replaceChildren();
   if (!jobId) return;
   const tasks = await api(`/jobs/${encodeURIComponent(jobId)}/tasks`);
-  for (const task of tasks) {
-    const li = document.createElement("li");
-    li.textContent = `${task.title} · ${task.status}${task.due_at ? " · due " + formatDate(task.due_at) : ""}`;
-    if (task.status !== "Completed") {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "secondary";
-      button.textContent = "Mark complete";
-      button.setAttribute("aria-label", `Mark "${task.title}" complete`);
-      button.addEventListener("click", async () => {
-        try {
-          await api(`/tasks/${encodeURIComponent(task.id)}`, {
-            method: "PATCH",
-            body: JSON.stringify({ status: "Completed" }),
-          });
-          await refreshTasks(jobId);
-          showNotice("Task marked complete.");
-        } catch (error) {
-          reportError(error, "Unable to update task.");
-        }
-      });
-      li.append(document.createTextNode(" "), button);
-    }
-    $("#taskList").append(li);
+  if (!tasks.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "No follow-up tasks for this job.";
+    $("#taskList").append(empty);
+    return;
   }
+  const now = Date.now();
+  for (const task of tasks) $("#taskList").append(taskRow(task, jobId, now));
+}
+
+// Value for <input type="datetime-local"> in the browser's own time zone.
+function toLocalInput(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+function taskRow(task, jobId, now) {
+  const done = task.status === "Completed";
+  const overdue = !done && task.due_at && new Date(task.due_at).getTime() < now;
+  const due = task.due_at ? ` · ${overdue ? "overdue since" : "due"} ${formatDate(task.due_at)}` : "";
+  const setStatus = (status, message) => async () => {
+    await api(`/tasks/${encodeURIComponent(task.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status }),
+    });
+    await refreshTasks(jobId);
+    showNotice(message);
+  };
+  const li = recordRow(`${task.title}${due}`, [
+    done
+      ? actionButton("Reopen", "secondary", `Reopen "${task.title}"`, setStatus("Pending", "Task reopened."))
+      : actionButton("Mark complete", "secondary", `Mark "${task.title}" complete`, setStatus("Completed", "Task marked complete.")),
+    actionButton("Edit", "secondary", `Edit task ${task.title}`, () => {
+      inlineEditor(li, [
+        { name: "title", label: "Task", required: true, maxLength: 200 },
+        {
+          name: "due_at", label: "Due (optional)", type: "datetime-local",
+          toInput: toLocalInput,
+          // A blank due date clears it.
+          fromInput: (raw) => (raw ? new Date(raw).toISOString() : null),
+        },
+      ], task, async (values) => {
+        await api(`/tasks/${encodeURIComponent(task.id)}`, {
+          method: "PATCH",
+          body: JSON.stringify(values),
+        });
+        await refreshTasks(jobId);
+        showNotice("Task updated.");
+      });
+    }),
+    actionButton("Delete", "danger", `Delete task ${task.title}`, async () => {
+      if (!window.confirm(`Delete the task "${task.title}"?`)) return;
+      await api(`/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
+      await refreshTasks(jobId);
+      showNotice("Task deleted.");
+    }),
+  ]);
+  if (overdue) li.classList.add("overdue");
+  if (done) li.classList.add("done");
+  return li;
 }
 
 $("#taskForm").addEventListener("submit", guarded(async (event) => {
@@ -1035,5 +1286,100 @@ $("#sketchForm").addEventListener("submit", guarded(async (event) => {
     showNotice("Sketch uploaded.");
   } catch (error) {
     reportError(error, "Unable to upload the sketch.");
+  }
+}));
+
+// Business profile (Sprint 1)
+
+let logoUrl = null;
+
+function clearProfileUi() {
+  $("#profileForm").reset();
+  $("#logoForm").reset();
+  showLogo(null);
+  $("#profilePanel").open = false;
+}
+
+function showLogo(blob) {
+  if (logoUrl) URL.revokeObjectURL(logoUrl);
+  logoUrl = blob ? URL.createObjectURL(blob) : null;
+  const preview = $("#logoPreview");
+  preview.classList.toggle("hidden", !logoUrl);
+  if (logoUrl) preview.src = logoUrl; else preview.removeAttribute("src");
+  $("#removeLogoButton").classList.toggle("hidden", !logoUrl);
+}
+
+async function loadLogo() {
+  const response = await fetch("/profile/logo", { headers: { Authorization: `Bearer ${accessToken}` } });
+  showLogo(response.ok ? await response.blob() : null);
+}
+
+function fillProfile(profile) {
+  const form = $("#profileForm");
+  for (const name of ["business_name", "license_number", "phone", "email", "address"]) {
+    form.elements[name].value = profile?.[name] || "";
+  }
+  $("#profileSummary").textContent = profile
+    ? `${profile.business_name}${profile.license_number ? " · License #" + profile.license_number : ""}`
+    : "Not set yet. Add your business name so it prints on your reports.";
+}
+
+async function loadProfile() {
+  const profile = await api("/profile");
+  fillProfile(profile);
+  // Open the section until the business name is set.
+  $("#profilePanel").open = !profile;
+  if (profile?.has_logo) await loadLogo(); else showLogo(null);
+}
+
+$("#profileForm").addEventListener("submit", guarded(async (event) => {
+  event.preventDefault();
+  const data = formObject(event.currentTarget);
+  try {
+    const saved = await api("/profile", {
+      method: "PUT",
+      body: JSON.stringify({
+        business_name: data.business_name.trim(),
+        license_number: data.license_number.trim(),
+        phone: data.phone.trim(),
+        email: data.email.trim() || null,
+        address: data.address.trim(),
+      }),
+    });
+    fillProfile(saved);
+    showNotice("Business details saved. New approvals will print them.");
+  } catch (error) {
+    reportError(error, "Unable to save business details.");
+  }
+}));
+
+$("#logoForm").addEventListener("submit", guarded(async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const file = form.elements.file.files[0];
+  if (!file) return showNotice("Choose a logo image.", "error");
+  if (!SKETCH_TYPES.has(file.type)) return showNotice("The logo must be a PNG, JPEG or WebP image.", "error");
+  if (file.size > MAX_SKETCH_BYTES) return showNotice("The logo must be 5 MB or smaller.", "error");
+  try {
+    await api("/profile/logo", {
+      method: "PUT",
+      body: JSON.stringify({ image: await readFileAsDataUrl(file) }),
+    });
+    form.reset();
+    await loadLogo();
+    showNotice("Logo uploaded.");
+  } catch (error) {
+    reportError(error, "Unable to upload the logo.");
+  }
+}));
+
+$("#removeLogoButton").addEventListener("click", guarded(async () => {
+  if (!window.confirm("Remove your logo? Reports already approved keep it.")) return;
+  try {
+    await api("/profile/logo", { method: "DELETE" });
+    showLogo(null);
+    showNotice("Logo removed.");
+  } catch (error) {
+    reportError(error, "Unable to remove the logo.");
   }
 }));
