@@ -148,6 +148,18 @@ class PrintedWorksheet:
 
 
 @dataclass
+class PrintedBusiness:
+    """The business details printed in the PDF header (from the snapshot)."""
+
+    name: str
+    phone: str | None = None
+    email: str | None = None
+    address: str | None = None
+    license_number: str | None = None
+    logo: bytes | None = None
+
+
+@dataclass
 class PrintedSketch:
     subject: str
     image: bytes
@@ -170,6 +182,7 @@ class ReportContext:
     content: str
     original_notes: str
     worksheet: PrintedWorksheet | None = None
+    business: PrintedBusiness | None = None
     sketches: list[PrintedSketch] = field(default_factory=list)
 
 
@@ -228,6 +241,23 @@ def _worksheet_flowables(worksheet, heading, base, label, avail):
     return flowables
 
 
+MAX_LOGO_HEIGHT = 0.8 * inch
+
+
+def _logo_flowables(logo: bytes | None, max_width: float) -> list:
+    """The logo scaled to fit the header, or nothing if absent or unreadable."""
+    if not logo:
+        return []
+    try:
+        width, height = ImageReader(io.BytesIO(logo)).getSize()
+    except Exception:
+        return []
+    scale = min(max_width / width, MAX_LOGO_HEIGHT / height, 1.0)
+    picture = PdfImage(io.BytesIO(logo), width=width * scale, height=height * scale)
+    picture.hAlign = "LEFT"
+    return [picture, Spacer(1, 4)]
+
+
 MAX_SKETCH_HEIGHT = 4.5 * inch
 
 
@@ -279,18 +309,40 @@ def create_pdf(ctx: ReportContext) -> bytes:
 
     story = []
 
-    header = Table(
-        [[
-            _para("Service Report", title),
-            _para(
-                f"Report #{ctx.report_id}\n"
-                f"Service date: {_date(ctx.service_date)}\n"
-                f"Approved: {_date(ctx.approved_at)}",
-                right,
-            ),
-        ]],
-        colWidths=[avail * 0.6, avail * 0.4],
+    report_meta = _para(
+        f"Report #{ctx.report_id}\n"
+        f"Service date: {_date(ctx.service_date)}\n"
+        f"Approved: {_date(ctx.approved_at)}",
+        right,
     )
+    if ctx.business is not None:
+        # Business header (Sprint 1): logo, name and contact details on the
+        # left; "Service Report" and the report details on the right.
+        business_name = ParagraphStyle(
+            "Business", parent=title, fontSize=15, leading=19,
+        )
+        right_title = ParagraphStyle("RightTitle", parent=title, fontSize=14,
+                                     leading=18, alignment=TA_RIGHT)
+        left = _logo_flowables(ctx.business.logo, avail * 0.3)
+        left.append(_para(ctx.business.name, business_name))
+        contact = [
+            value for value in (
+                ctx.business.address,
+                " · ".join(v for v in (ctx.business.phone, ctx.business.email) if v),
+                f"License #{ctx.business.license_number}" if ctx.business.license_number else "",
+            ) if value
+        ]
+        if contact:
+            left.append(_para("\n".join(contact), small))
+        header = Table(
+            [[left, [_para("Service Report", right_title), report_meta]]],
+            colWidths=[avail * 0.6, avail * 0.4],
+        )
+    else:
+        header = Table(
+            [[_para("Service Report", title), report_meta]],
+            colWidths=[avail * 0.6, avail * 0.4],
+        )
     header.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LINEBELOW", (0, 0), (-1, 0), 1.2, colors.HexColor("#102a43")),

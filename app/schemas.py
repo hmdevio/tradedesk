@@ -1,7 +1,7 @@
 
 """Pydantic request/response schemas: validate inputs at the API boundary."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, ClassVar, Literal
 
 from pydantic import (
@@ -10,6 +10,7 @@ from pydantic import (
     EmailStr,
     Field,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 from typing_extensions import Annotated
@@ -162,6 +163,16 @@ class CustomerOut(BaseModel):
     created_at: datetime
 
 
+class DeleteImpact(BaseModel):
+    """Records a customer or job deletion would remove (Sprint 1 / U5)."""
+
+    jobs: int = 0
+    reports: int = 0
+    approved_reports: int = 0
+    tasks: int = 0
+    sketches: int = 0
+
+
 # Job schemas
 
 
@@ -251,6 +262,18 @@ class TaskOut(BaseModel):
     status: str
     created_at: datetime
 
+    @field_validator("due_at", "created_at")
+    @classmethod
+    def assume_utc(cls, value: datetime | None) -> datetime | None:
+        """Send times with their UTC offset so browsers show local time.
+
+        SQLite returns stored times without a time zone; without this, a
+        9:00 AM due time in Chicago came back as 3:00 PM (Sprint 1 / U5).
+        """
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value
+
 
 # Trade worksheet schemas (Phase 2c)
 
@@ -297,3 +320,36 @@ class SketchOut(BaseModel):
     created_at: datetime
     # True when an approved report includes this sketch; it can't be deleted.
     locked: bool = False
+
+
+# Business profile (Sprint 1)
+
+OptionalText40 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=40)]
+OptionalText80 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=80)]
+OptionalText300 = Annotated[str, StringConstraints(strip_whitespace=True, max_length=300)]
+
+
+class BusinessProfileIn(BaseModel):
+    business_name: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+    ]
+    phone: OptionalText40 | None = None
+    email: EmailStr | None = None
+    address: OptionalText300 | None = None
+    license_number: OptionalText80 | None = None
+
+
+class BusinessProfileOut(BaseModel):
+    business_name: str
+    phone: str | None
+    email: str | None
+    address: str | None
+    license_number: str | None
+    has_logo: bool
+    updated_at: datetime
+
+
+class LogoUpload(BaseModel):
+    # PNG, JPEG or WebP data URL, up to 5 MB decoded; resized to 600 px.
+    image: str = Field(min_length=1, max_length=7_200_000)

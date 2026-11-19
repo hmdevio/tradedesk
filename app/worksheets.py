@@ -247,6 +247,7 @@ def printable_rows(trade: str, data_json: str) -> tuple[str, list[tuple[str, str
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024        # decoded upload size
 MAX_SOURCE_PIXELS = 40_000_000            # refuse decompression bombs
 MAX_STORED_SIDE = 2000                    # longest side after resizing
+MAX_LOGO_SIDE = 600                       # business logo, longest side
 MAX_SKETCHES_PER_JOB = 10
 ALLOWED_FORMATS = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 DATA_URL = re.compile(
@@ -263,7 +264,7 @@ class ProcessedImage:
     sha256: str
 
 
-def process_sketch(data_url: str) -> ProcessedImage:
+def process_sketch(data_url: str, max_side: int = MAX_STORED_SIDE) -> ProcessedImage:
     """Decode, check and re-encode an uploaded sketch.
 
     Re-encoding is the security step: only pixels survive, so EXIF data
@@ -297,7 +298,7 @@ def process_sketch(data_url: str) -> ProcessedImage:
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
         raise WorksheetError("The sketch file could not be read as an image.") from None
 
-    image.thumbnail((MAX_STORED_SIDE, MAX_STORED_SIDE))
+    image.thumbnail((max_side, max_side))
     output = io.BytesIO()
     if image.mode == "L" or _looks_like_drawing(image):
         image.save(output, format="PNG", optimize=True)

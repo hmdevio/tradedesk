@@ -11,6 +11,7 @@ Security-oriented notes:
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+import base64
 import hashlib
 import json
 import logging
@@ -53,6 +54,7 @@ from app.email_delivery import (
 )
 from app.models import (
     AuthSession,
+    BusinessProfile,
     Customer,
     EmailVerificationToken,
     Job,
@@ -67,6 +69,7 @@ from app.models import (
 )
 from app.rate_limit import enforce_rate_limit, verify_redis_connection
 from app.reporting import (
+    PrintedBusiness,
     PrintedSketch,
     PrintedWorksheet,
     ReportContentError,
@@ -76,6 +79,7 @@ from app.reporting import (
     validate_report_content,
 )
 from app.worksheets import (
+    MAX_LOGO_SIDE,
     MAX_SKETCHES_PER_JOB,
     TRADES,
     WorksheetError,
@@ -86,10 +90,14 @@ from app.worksheets import (
     validate_values,
 )
 from app.schemas import (
+    BusinessProfileIn,
+    BusinessProfileOut,
     CustomerCreate,
     CustomerOut,
     CustomerUpdate,
+    DeleteImpact,
     EmailRequest,
+    LogoUpload,
     EmailVerificationRequest,
     JobCreate,
     JobOut,
@@ -292,6 +300,12 @@ app.mount(
 def home():
     """Serve the dashboard shell; the frontend calls the protected API."""
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    """Browsers ask for /favicon.ico on their own; serve the SVG icon (Sprint 1)."""
+    return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
 @app.get("/health")
@@ -1351,10 +1365,69 @@ def delete_customer(
         user.id,
     )
 
+    # Approved reports are the record a customer has received; deleting the
+    # customer would delete them too (cascade). Sprint 1 / U5.
+    if _delete_impact(db, customer_id=customer.id).approved_reports:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This customer has approved reports, so it can't be "
+                "deleted. Mark their jobs Completed or Cancelled instead."
+            ),
+        )
+
     db.delete(customer)
     db.commit()
 
     return Response(status_code=204)
+
+
+@app.get(
+    "/customers/{customer_id}/impact",
+    response_model=DeleteImpact,
+)
+def customer_delete_impact(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What deleting this customer would also remove (for the confirmation)."""
+    owned_customer(db, customer_id, user.id)
+    return _delete_impact(db, customer_id=customer_id)
+
+
+def _delete_impact(
+    db: Session,
+    *,
+    customer_id: int | None = None,
+    job_id: int | None = None,
+) -> DeleteImpact:
+    """Count the records a customer or job deletion cascades to."""
+    if job_id is not None:
+        job_ids = [job_id]
+    else:
+        job_ids = list(
+            db.scalars(select(Job.id).where(Job.customer_id == customer_id))
+        )
+    if not job_ids:
+        return DeleteImpact()
+
+    def count(model, *conditions):
+        return db.scalar(
+            select(func.count()).select_from(model).where(*conditions)
+        ) or 0
+
+    return DeleteImpact(
+        jobs=len(job_ids),
+        reports=count(ServiceReport, ServiceReport.job_id.in_(job_ids)),
+        approved_reports=count(
+            ServiceReport,
+            ServiceReport.job_id.in_(job_ids),
+            ServiceReport.status == "Approved",
+        ),
+        tasks=count(Task, Task.job_id.in_(job_ids)),
+        sketches=count(WorksheetSketch, WorksheetSketch.job_id.in_(job_ids)),
+    )
 
 
 # Job management
@@ -1525,10 +1598,33 @@ def delete_job(
         user.id,
     )
 
+    if _delete_impact(db, job_id=job.id).approved_reports:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This job has approved reports, so it can't be deleted. "
+                "Mark it Completed or Cancelled instead."
+            ),
+        )
+
     db.delete(job)
     db.commit()
 
     return Response(status_code=204)
+
+
+@app.get(
+    "/jobs/{job_id}/impact",
+    response_model=DeleteImpact,
+)
+def job_delete_impact(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """What deleting this job would also remove (for the confirmation)."""
+    owned_job(db, job_id, user.id)
+    return _delete_impact(db, job_id=job_id)
 
 
 # Service report management
@@ -1678,7 +1774,11 @@ def approve_report(
         ReportWorksheetSnapshot(
             report_id=report.id,
             content=json.dumps(
-                _worksheet_snapshot(db, report.job_id), ensure_ascii=False
+                {
+                    **_worksheet_snapshot(db, report.job_id),
+                    "business": _business_snapshot(db, user.id),
+                },
+                ensure_ascii=False,
             ),
         )
     )
@@ -1714,6 +1814,8 @@ def export_report_pdf(
     )
 
     customer = owned_customer(db, job.customer_id, user.id)
+    printed = _printed_worksheet(db, report)
+    business = printed.get("business")
 
     pdf_bytes = create_pdf(
         ReportContext(
@@ -1724,13 +1826,15 @@ def export_report_pdf(
             customer_address=customer.address,
             customer_phone=customer.phone,
             customer_email=customer.email,
-            prepared_by=user.email,
+            # The business name from the approval snapshot; reports approved
+            # before business profiles existed keep the account email.
+            prepared_by=business.name if business else user.email,
             service_date=report.created_at,
             # Approval is the last permitted change to a report.
             approved_at=report.updated_at,
             content=report.generated_content,
             original_notes=report.original_notes,
-            **_printed_worksheet(db, report),
+            **printed,
         )
     )
 
@@ -1989,6 +2093,9 @@ def _printed_worksheet(db: Session, report: ServiceReport) -> dict:
         return {}
 
     printed: dict = {}
+    business = _printed_business(snapshot.get("business"))
+    if business is not None:
+        printed["business"] = business
     if snapshot.get("trade"):
         label, rows = printable_rows(snapshot["trade"], snapshot.get("data") or "{}")
         notes = snapshot.get("notes")
@@ -2228,4 +2335,160 @@ def delete_sketch(
         )
     db.delete(sketch)
     db.commit()
+    return Response(status_code=204)
+
+
+# Business profile (Sprint 1)
+
+
+def _profile_out(profile: BusinessProfile) -> BusinessProfileOut:
+    return BusinessProfileOut(
+        business_name=profile.business_name,
+        phone=profile.phone,
+        email=profile.email,
+        address=profile.address,
+        license_number=profile.license_number,
+        has_logo=profile.logo is not None,
+        updated_at=profile.updated_at,
+    )
+
+
+def _user_profile(db: Session, user_id: int) -> BusinessProfile | None:
+    return db.scalar(
+        select(BusinessProfile).where(BusinessProfile.user_id == user_id)
+    )
+
+
+def _business_snapshot(db: Session, user_id: int) -> dict | None:
+    """Business details frozen into a report at approval (logo as base64)."""
+    profile = _user_profile(db, user_id)
+    if profile is None:
+        return None
+    return {
+        "name": profile.business_name,
+        "phone": profile.phone,
+        "email": profile.email,
+        "address": profile.address,
+        "license_number": profile.license_number,
+        "logo": (
+            base64.b64encode(profile.logo).decode("ascii")
+            if profile.logo is not None else None
+        ),
+    }
+
+
+def _printed_business(data) -> PrintedBusiness | None:
+    if not isinstance(data, dict) or not data.get("name"):
+        return None
+    logo = None
+    if data.get("logo"):
+        try:
+            logo = base64.b64decode(data["logo"])
+        except (ValueError, TypeError):
+            logo = None
+    return PrintedBusiness(
+        name=str(data["name"]),
+        phone=data.get("phone"),
+        email=data.get("email"),
+        address=data.get("address"),
+        license_number=data.get("license_number"),
+        logo=logo,
+    )
+
+
+@app.get("/profile", response_model=BusinessProfileOut | None)
+def get_profile(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The account's business profile, or null when none is set."""
+    profile = _user_profile(db, user.id)
+    return _profile_out(profile) if profile else None
+
+
+@app.put("/profile", response_model=BusinessProfileOut)
+def save_profile(
+    payload: BusinessProfileIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Create or update the business profile (blank fields are cleared)."""
+    profile = _user_profile(db, user.id)
+    if profile is None:
+        profile = BusinessProfile(user_id=user.id, business_name=payload.business_name)
+        db.add(profile)
+    profile.business_name = payload.business_name
+    profile.phone = payload.phone or None
+    profile.email = normalize_email(str(payload.email)) if payload.email else None
+    profile.address = payload.address or None
+    profile.license_number = payload.license_number or None
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The profile was changed at the same time. Try again.",
+        ) from None
+    db.refresh(profile)
+    return _profile_out(profile)
+
+
+@app.put("/profile/logo", response_model=BusinessProfileOut)
+def upload_logo(
+    payload: LogoUpload,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Set the logo: checked and re-encoded like sketches, max 600 px."""
+    enforce_rate_limit(
+        request,
+        "logo-upload",
+        limit=20,
+        window_seconds=3600,
+        subject=f"user:{user.id}",
+    )
+    profile = _user_profile(db, user.id)
+    if profile is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Save your business name before adding a logo.",
+        )
+    try:
+        image = process_sketch(payload.image, max_side=MAX_LOGO_SIDE)
+    except WorksheetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    profile.logo = image.content
+    profile.logo_content_type = image.content_type
+    db.commit()
+    db.refresh(profile)
+    return _profile_out(profile)
+
+
+@app.get("/profile/logo")
+def get_logo(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    profile = _user_profile(db, user.id)
+    if profile is None or profile.logo is None:
+        raise HTTPException(status_code=404, detail="No logo")
+    return Response(
+        content=profile.logo,
+        media_type=profile.logo_content_type or "image/png",
+        headers={"Content-Disposition": 'inline; filename="logo"'},
+    )
+
+
+@app.delete("/profile/logo", status_code=204)
+def delete_logo(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    profile = _user_profile(db, user.id)
+    if profile is not None:
+        profile.logo = None
+        profile.logo_content_type = None
+        db.commit()
     return Response(status_code=204)

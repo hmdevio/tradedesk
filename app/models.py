@@ -420,3 +420,33 @@ class ReportWorksheetSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class BusinessProfile(Base):
+    """The account owner's business details, printed on every PDF report.
+
+    One per user. Approving a report copies these details into the report's
+    snapshot, so later edits don't change a PDF already sent (Sprint 1).
+    """
+
+    __tablename__ = "business_profiles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    business_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    license_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    logo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    logo_content_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
