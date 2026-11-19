@@ -67,7 +67,8 @@ def test_reregistering_does_not_change_the_password(
     # Pending verification links are voided, so the account can only be
     # finished through the emailed setup link.
     assert client.post(
-        "/auth/verify-email", json={"token": owner_link}
+        "/auth/verify-email",
+        json={"token": owner_link, "password": owner_password},
     ).status_code == 400
 
     # The second registrant's password never works.

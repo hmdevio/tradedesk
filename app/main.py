@@ -23,10 +23,13 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     Response,
     status,
 )
+from fastapi.security import HTTPAuthorizationCredentials
+import jwt
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -38,7 +41,11 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
-from app.dependencies import get_current_session, get_current_user
+from app.dependencies import (
+    bearer_scheme,
+    get_current_session,
+    get_current_user,
+)
 from app.email_delivery import (
     send_existing_account_email,
     send_password_reset_email,
@@ -49,19 +56,34 @@ from app.models import (
     Customer,
     EmailVerificationToken,
     Job,
+    JobWorksheet,
     PasswordResetToken,
+    ReportWorksheetSnapshot,
     ServiceReport,
     Task,
     User,
+    WorksheetSketch,
     normalize_email,
 )
 from app.rate_limit import enforce_rate_limit, verify_redis_connection
 from app.reporting import (
+    PrintedSketch,
+    PrintedWorksheet,
     ReportContentError,
     ReportContext,
     create_pdf,
     make_report_draft,
     validate_report_content,
+)
+from app.worksheets import (
+    MAX_SKETCHES_PER_JOB,
+    TRADES,
+    WorksheetError,
+    printable_rows,
+    process_sketch,
+    public_templates,
+    validate_notes,
+    validate_values,
 )
 from app.schemas import (
     CustomerCreate,
@@ -78,14 +100,23 @@ from app.schemas import (
     ReportDraftRequest,
     ReportEdit,
     ReportOut,
+    SketchCreate,
+    SketchOut,
     TaskCreate,
     TaskOut,
     TaskUpdate,
     TokenResponse,
     UserCreate,
     UserLogin,
+    WorksheetIn,
+    WorksheetOut,
 )
-from app.security import create_access_token, hash_password, verify_password
+from app.security import (
+    ALGORITHM,
+    create_access_token,
+    hash_password,
+    verify_password,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -96,11 +127,8 @@ ENVIRONMENT = settings.environment.strip().lower()
 IS_PRODUCTION = ENVIRONMENT == "production"
 
 
-if IS_PRODUCTION:
-    if len(settings.secret_key) < 32:
-        raise RuntimeError(
-            "SECRET_KEY must contain at least 32 characters in production"
-        )
+# SECRET_KEY length and ENVIRONMENT are validated in app/config.py for every
+# environment (audit finding S5), so a weak key cannot reach this point.
 
 
 dummy_hasher = PasswordHash.recommended()
@@ -118,6 +146,13 @@ async def lifespan(app: FastAPI):
     elif engine.dialect.name == "sqlite":
         # SQLite is used for local development and automated tests.
         Base.metadata.create_all(bind=engine)
+
+    if not IS_PRODUCTION and not settings.redis_url:
+        # Make the development fallback visible (audit finding S5).
+        logger.warning(
+            "REDIS_URL is not set: rate limiting is disabled in %s mode",
+            ENVIRONMENT,
+        )
 
     # PostgreSQL schema changes must be applied through Alembic.
     yield
@@ -184,6 +219,9 @@ FIELD_LABELS = {
     "status": "Status",
     "due_at": "Due date",
     "generated_content": "Report content",
+    "image": "Sketch file",
+    "subject": "Subject",
+    "trade": "Trade",
 }
 
 
@@ -265,10 +303,29 @@ def health() -> dict[str, str]:
 # Authentication and session management
 
 
-def issue_session(db: Session, user: User) -> TokenResponse:
-    """Persist a revocable session before returning its signed bearer token."""
+def issue_session(
+    db: Session,
+    user: User,
+    auth_time: datetime | None = None,
+) -> TokenResponse:
+    """Persist a revocable session before returning its signed bearer token.
+
+    ``auth_time`` is when the password was last entered. A renewal passes the
+    original value, and no session may outlive auth_time + SESSION_MAX_HOURS.
+    """
     now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(minutes=settings.access_token_minutes)
+    auth_time = auth_time or now
+    session_limit = auth_time + timedelta(hours=settings.session_max_hours)
+    expires_at = min(
+        now + timedelta(minutes=settings.access_token_minutes),
+        session_limit,
+    )
+    if expires_at <= now:
+        raise HTTPException(
+            status_code=401,
+            detail="Session time limit reached. Sign in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     session = AuthSession(
         id=str(uuid4()),
@@ -295,11 +352,14 @@ def issue_session(db: Session, user: User) -> TokenResponse:
         user.id,
         session.id,
         expires_at,
+        auth_time,
     )
 
     return TokenResponse(
         access_token=token,
-        expires_in_seconds=settings.access_token_minutes * 60,
+        # The real remaining time: shorter than ACCESS_TOKEN_MINUTES near the
+        # session limit, so the interface warns at the right moment.
+        expires_in_seconds=max(int((expires_at - now).total_seconds()), 1),
     )
 
 
@@ -361,6 +421,16 @@ def register(
     )
 
     email = normalize_email(str(payload.email))
+
+    # Per-address limit (audit finding S9): stops one inbox from being
+    # flooded with emails sent from many IP addresses.
+    enforce_rate_limit(
+        request,
+        "register-email",
+        limit=3,
+        window_seconds=3600,
+        subject=email,
+    )
 
     existing = db.scalar(
         select(User).where(
@@ -489,47 +559,70 @@ def _deliver_existing_account_notice(
 @app.post("/auth/verify-email")
 def verify_email(
     payload: EmailVerificationRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
-    """Consume one valid, unexpired verification token exactly once."""
+    """Verify an email with the emailed token AND the account's password.
+
+    Audit remediation Phase 2b: before this, anyone who clicked a
+    verification email verified the account under whatever password its
+    creator chose, even if they had never registered. Asking for the
+    password means only the person who registered can finish, and a
+    stranger's click does nothing. A wrong password does not use up the link.
+    """
+    enforce_rate_limit(
+        request,
+        "email-verification-confirm",
+        limit=10,
+        window_seconds=900,
+    )
+
     now = datetime.now(timezone.utc)
+    invalid_link = HTTPException(
+        status_code=400,
+        detail="Verification link is invalid or expired",
+    )
 
     digest = hashlib.sha256(
         payload.token.encode("utf-8")
     ).hexdigest()
 
-    # Atomic conditional update:
-    # Only an unused, unexpired token can be consumed.
-    statement = (
-        update(EmailVerificationToken)
-        .where(
+    pending = db.scalar(
+        select(EmailVerificationToken).where(
             EmailVerificationToken.token_hash == digest,
             EmailVerificationToken.used_at.is_(None),
             EmailVerificationToken.expires_at > now,
         )
-        .values(used_at=now)
-        .returning(EmailVerificationToken.user_id)
     )
-
-    user_id = db.execute(statement).scalar_one_or_none()
-
-    if user_id is None:
-        db.rollback()
-
-        raise HTTPException(
-            status_code=400,
-            detail="Verification link is invalid or expired",
-        )
-
-    user = db.get(User, user_id)
+    user = db.get(User, pending.user_id) if pending is not None else None
 
     if user is None:
-        db.rollback()
+        raise invalid_link
 
+    if not verify_password(payload.password, user.password_hash):
         raise HTTPException(
             status_code=400,
-            detail="Verification link is invalid or expired",
+            detail=(
+                "That password doesn't match this account. Enter the "
+                "password you chose when you created the account."
+            ),
         )
+
+    # Atomic conditional update:
+    # Only an unused, unexpired token can be consumed, exactly once.
+    consumed = db.execute(
+        update(EmailVerificationToken)
+        .where(
+            EmailVerificationToken.id == pending.id,
+            EmailVerificationToken.used_at.is_(None),
+        )
+        .values(used_at=now)
+        .returning(EmailVerificationToken.user_id)
+    ).scalar_one_or_none()
+
+    if consumed is None:
+        db.rollback()
+        raise invalid_link
 
     user.email_verified = True
     user.email_verified_at = now
@@ -619,6 +712,17 @@ def login(
 
     email = normalize_email(str(payload.email))
 
+    # Per-account limit (audit finding S9): attempts from many IP addresses
+    # against one account share this counter. Unknown emails are counted too,
+    # so the response does not reveal which accounts exist.
+    enforce_rate_limit(
+        request,
+        "login-account",
+        limit=10,
+        window_seconds=900,
+        subject=email,
+    )
+
     user = db.scalar(
         select(User).where(
             func.lower(func.trim(User.email)) == email
@@ -679,10 +783,20 @@ def logout(
 )
 def change_password(
     payload: PasswordChange,
+    request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Change the password and revoke all active sessions for the account."""
+    # Limits guessing the current password from a stolen session (S9).
+    enforce_rate_limit(
+        request,
+        "password-change",
+        limit=5,
+        window_seconds=900,
+        subject=f"user:{user.id}",
+    )
+
     if not verify_password(
         payload.current_password,
         user.password_hash,
@@ -719,12 +833,14 @@ def change_password(
 )
 def refresh_session(
     auth_session: AuthSession = Depends(get_current_session),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> TokenResponse:
     """Exchange a live session for a new one and revoke the old token.
 
     Lets the interface keep an active user signed in (audit finding U3)
-    without long-lived tokens. Only a valid, unexpired session can renew.
+    without long-lived tokens. Only a valid, unexpired session can renew,
+    and never past SESSION_MAX_HOURS after the original sign-in (Phase 2b).
     """
     user = db.get(User, auth_session.user_id)
     if user is None:
@@ -733,8 +849,34 @@ def refresh_session(
             detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    auth_time = _token_auth_time(credentials, auth_session)
     auth_session.revoked_at = datetime.now(timezone.utc)
-    return issue_session(db, user)
+    return issue_session(db, user, auth_time=auth_time)
+
+
+def _token_auth_time(
+    credentials: HTTPAuthorizationCredentials | None,
+    auth_session: AuthSession,
+) -> datetime:
+    """Read the original sign-in time from an already validated token.
+
+    Tokens issued before Phase 2b have no auth_time claim; their session's
+    creation time is the closest safe value.
+    """
+    fallback = auth_session.created_at
+    if fallback.tzinfo is None:  # SQLite returns naive UTC datetimes.
+        fallback = fallback.replace(tzinfo=timezone.utc)
+    if credentials is None:
+        return fallback
+    payload = jwt.decode(
+        credentials.credentials,
+        settings.secret_key,
+        algorithms=[ALGORITHM],
+    )
+    claim = payload.get("auth_time")
+    if isinstance(claim, int):
+        return datetime.fromtimestamp(claim, tz=timezone.utc)
+    return fallback
 
 
 def _hash_token(raw_token: str) -> str:
@@ -798,6 +940,16 @@ def forgot_password(
     )
 
     email = normalize_email(str(payload.email))
+
+    # Per-address limit (S9): no inbox flooding from many IP addresses.
+    enforce_rate_limit(
+        request,
+        "password-reset-email",
+        limit=3,
+        window_seconds=3600,
+        subject=email,
+    )
+
     user = db.scalar(
         select(User).where(func.lower(func.trim(User.email)) == email)
     )
@@ -1003,6 +1155,12 @@ def owned_task(
     return task
 
 
+# List pagination (audit finding S13): every list returns at most PAGE_MAX
+# rows per request. Use ?limit= and ?offset= to page through longer lists.
+PAGE_DEFAULT = 100
+PAGE_MAX = 200
+
+
 # Customer management
 
 
@@ -1011,6 +1169,8 @@ def owned_task(
     response_model=list[CustomerOut],
 )
 def list_customers(
+    limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1019,6 +1179,8 @@ def list_customers(
             select(Customer)
             .where(Customer.user_id == user.id)
             .order_by(Customer.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
     )
 
@@ -1203,6 +1365,8 @@ def delete_customer(
     response_model=list[JobOut],
 )
 def list_jobs(
+    limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1214,6 +1378,8 @@ def list_jobs(
                 func.lower(Job.title).asc(),
                 Job.id.desc(),
             )
+            .limit(limit)
+            .offset(offset)
         )
     )
 
@@ -1413,6 +1579,8 @@ def create_report_draft(
 )
 def list_reports(
     job_id: int,
+    limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1428,6 +1596,8 @@ def list_reports(
                 Job.user_id == user.id,
             )
             .order_by(ServiceReport.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
     )
 
@@ -1502,6 +1672,17 @@ def approve_report(
 
     report.status = "Approved"
 
+    # Freeze the job's worksheet and sketch list with the approval, so the
+    # PDF the customer receives cannot change later (Phase 2c).
+    db.add(
+        ReportWorksheetSnapshot(
+            report_id=report.id,
+            content=json.dumps(
+                _worksheet_snapshot(db, report.job_id), ensure_ascii=False
+            ),
+        )
+    )
+
     db.commit()
     db.refresh(report)
 
@@ -1549,6 +1730,7 @@ def export_report_pdf(
             approved_at=report.updated_at,
             content=report.generated_content,
             original_notes=report.original_notes,
+            **_printed_worksheet(db, report),
         )
     )
 
@@ -1573,6 +1755,8 @@ def export_report_pdf(
 )
 def list_tasks(
     job_id: int,
+    limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1591,6 +1775,8 @@ def list_tasks(
                 Job.user_id == user.id,
             )
             .order_by(Task.id.desc())
+            .limit(limit)
+            .offset(offset)
         )
     )
 
@@ -1725,4 +1911,321 @@ def delete_task(
     db.delete(task)
     db.commit()
 
+    return Response(status_code=204)
+
+
+# Trade worksheets and sketches (Phase 2c)
+
+
+def _worksheet_out(worksheet: JobWorksheet) -> WorksheetOut:
+    try:
+        values = json.loads(worksheet.data)
+    except (TypeError, ValueError):
+        values = {}
+    return WorksheetOut(
+        job_id=worksheet.job_id,
+        trade=worksheet.trade,
+        trade_label=TRADES.get(worksheet.trade, {}).get("label", worksheet.trade),
+        values=values if isinstance(values, dict) else {},
+        notes=worksheet.notes,
+        updated_at=worksheet.updated_at,
+    )
+
+
+def _locked_sketch_ids(db: Session, job_id: int) -> set[int]:
+    """Sketch IDs printed on an approved report of this job."""
+    locked: set[int] = set()
+    contents = db.scalars(
+        select(ReportWorksheetSnapshot.content)
+        .join(ServiceReport)
+        .where(ServiceReport.job_id == job_id)
+    )
+    for content in contents:
+        try:
+            ids = json.loads(content).get("sketch_ids", [])
+        except (TypeError, ValueError, AttributeError):
+            continue
+        locked.update(i for i in ids if isinstance(i, int))
+    return locked
+
+
+def _sketch_out(sketch: WorksheetSketch, locked: set[int]) -> SketchOut:
+    out = SketchOut.model_validate(sketch)
+    out.locked = sketch.id in locked
+    return out
+
+
+def _worksheet_snapshot(db: Session, job_id: int) -> dict:
+    worksheet = db.scalar(
+        select(JobWorksheet).where(JobWorksheet.job_id == job_id)
+    )
+    sketch_ids = list(
+        db.scalars(
+            select(WorksheetSketch.id)
+            .where(WorksheetSketch.job_id == job_id)
+            .order_by(WorksheetSketch.id)
+        )
+    )
+    return {
+        "trade": worksheet.trade if worksheet else None,
+        "data": worksheet.data if worksheet else None,
+        "notes": worksheet.notes if worksheet else None,
+        "sketch_ids": sketch_ids,
+    }
+
+
+def _printed_worksheet(db: Session, report: ServiceReport) -> dict:
+    """Worksheet and sketches for the PDF, from the approval snapshot.
+
+    Reports approved before worksheets existed have no snapshot and print
+    without a worksheet section.
+    """
+    snapshot_row = db.get(ReportWorksheetSnapshot, report.id)
+    if snapshot_row is None:
+        return {}
+    try:
+        snapshot = json.loads(snapshot_row.content)
+    except (TypeError, ValueError):
+        return {}
+
+    printed: dict = {}
+    if snapshot.get("trade"):
+        label, rows = printable_rows(snapshot["trade"], snapshot.get("data") or "{}")
+        notes = snapshot.get("notes")
+        if rows or notes:
+            printed["worksheet"] = PrintedWorksheet(label, rows, notes)
+
+    ids = [i for i in snapshot.get("sketch_ids", []) if isinstance(i, int)]
+    if ids:
+        sketches = db.scalars(
+            select(WorksheetSketch)
+            .where(
+                WorksheetSketch.id.in_(ids),
+                WorksheetSketch.job_id == report.job_id,
+            )
+            .order_by(WorksheetSketch.id)
+        )
+        printed["sketches"] = [
+            PrintedSketch(sketch.subject, sketch.image) for sketch in sketches
+        ]
+    return printed
+
+
+@app.get("/worksheet-templates")
+def worksheet_templates(
+    user: User = Depends(get_current_user),
+) -> list[dict]:
+    """Field definitions for each trade's worksheet."""
+    return public_templates()
+
+
+@app.get(
+    "/jobs/{job_id}/worksheet",
+    response_model=WorksheetOut | None,
+)
+def get_worksheet(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return the job's worksheet, or null when none has been saved."""
+    owned_job(db, job_id, user.id)
+    worksheet = db.scalar(
+        select(JobWorksheet).where(JobWorksheet.job_id == job_id)
+    )
+    return _worksheet_out(worksheet) if worksheet else None
+
+
+@app.put(
+    "/jobs/{job_id}/worksheet",
+    response_model=WorksheetOut,
+)
+def save_worksheet(
+    job_id: int,
+    payload: WorksheetIn,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Create or replace the job's worksheet after validating every value."""
+    owned_job(db, job_id, user.id)
+    try:
+        values = validate_values(payload.trade, payload.values)
+        notes = validate_notes(payload.notes)
+    except WorksheetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    worksheet = db.scalar(
+        select(JobWorksheet).where(JobWorksheet.job_id == job_id)
+    )
+    if worksheet is None:
+        worksheet = JobWorksheet(job_id=job_id, trade=payload.trade, data="{}")
+        db.add(worksheet)
+    worksheet.trade = payload.trade
+    worksheet.data = json.dumps(values, ensure_ascii=False)
+    worksheet.notes = notes
+
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two saves raced to create the same job's worksheet.
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="The worksheet was changed at the same time. Try again.",
+        ) from None
+    db.refresh(worksheet)
+    return _worksheet_out(worksheet)
+
+
+@app.delete(
+    "/jobs/{job_id}/worksheet",
+    status_code=204,
+)
+def delete_worksheet(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    owned_job(db, job_id, user.id)
+    db.execute(
+        delete(JobWorksheet)
+        .where(JobWorksheet.job_id == job_id)
+        .execution_options(synchronize_session=False)
+    )
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get(
+    "/jobs/{job_id}/sketches",
+    response_model=list[SketchOut],
+)
+def list_sketches(
+    job_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    owned_job(db, job_id, user.id)
+    locked = _locked_sketch_ids(db, job_id)
+    return [
+        _sketch_out(sketch, locked)
+        for sketch in db.scalars(
+            select(WorksheetSketch)
+            .where(WorksheetSketch.job_id == job_id)
+            .order_by(WorksheetSketch.id)
+        )
+    ]
+
+
+@app.post(
+    "/jobs/{job_id}/sketches",
+    response_model=SketchOut,
+    status_code=201,
+)
+def upload_sketch(
+    job_id: int,
+    payload: SketchCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Attach a sketch or plot image with a subject line to a job.
+
+    The image is decoded, size-checked and re-encoded before storage; see
+    app/worksheets.process_sketch.
+    """
+    # Image processing costs CPU; cap uploads per account.
+    enforce_rate_limit(
+        request,
+        "sketch-upload",
+        limit=30,
+        window_seconds=3600,
+        subject=f"user:{user.id}",
+    )
+    owned_job(db, job_id, user.id)
+
+    count = db.scalar(
+        select(func.count())
+        .select_from(WorksheetSketch)
+        .where(WorksheetSketch.job_id == job_id)
+    )
+    if count >= MAX_SKETCHES_PER_JOB:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A job can have at most {MAX_SKETCHES_PER_JOB} sketches.",
+        )
+
+    try:
+        image = process_sketch(payload.image)
+    except WorksheetError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+    sketch = WorksheetSketch(
+        job_id=job_id,
+        subject=payload.subject,
+        content_type=image.content_type,
+        image=image.content,
+        size_bytes=len(image.content),
+        width=image.width,
+        height=image.height,
+        sha256=image.sha256,
+    )
+    db.add(sketch)
+    db.commit()
+    db.refresh(sketch)
+    return _sketch_out(sketch, set())
+
+
+def owned_sketch(db: Session, sketch_id: int, user_id: int) -> WorksheetSketch:
+    """Return a sketch only when its job belongs to the user."""
+    sketch = db.scalar(
+        select(WorksheetSketch)
+        .join(Job)
+        .where(WorksheetSketch.id == sketch_id, Job.user_id == user_id)
+    )
+    if sketch is None:
+        raise HTTPException(status_code=404, detail="Sketch not found")
+    return sketch
+
+
+@app.get("/sketches/{sketch_id}/image")
+def sketch_image(
+    sketch_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Serve a stored sketch to its owner only."""
+    sketch = owned_sketch(db, sketch_id, user.id)
+    extension = "png" if sketch.content_type == "image/png" else "jpg"
+    return Response(
+        content=sketch.image,
+        media_type=sketch.content_type,
+        headers={
+            "Content-Disposition": (
+                f'inline; filename="sketch-{sketch.id}.{extension}"'
+            ),
+        },
+    )
+
+
+@app.delete(
+    "/sketches/{sketch_id}",
+    status_code=204,
+)
+def delete_sketch(
+    sketch_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    sketch = owned_sketch(db, sketch_id, user.id)
+    if sketch.id in _locked_sketch_ids(db, sketch.job_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This sketch is part of an approved report and can't be "
+                "deleted."
+            ),
+        )
+    db.delete(sketch)
+    db.commit()
     return Response(status_code=204)

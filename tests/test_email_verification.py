@@ -103,7 +103,7 @@ def test_valid_verification_token_verifies_account(
 
     response = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     assert response.status_code == 200
@@ -134,7 +134,7 @@ def test_verified_user_can_log_in(
 
     verification = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     assert verification.status_code == 200
@@ -149,7 +149,7 @@ def test_verified_user_can_log_in(
 def test_invalid_verification_token_is_rejected(client):
     response = client.post(
         "/auth/verify-email",
-        json={"token": "x" * 48},
+        json={"token": "x" * 48, "password": "a-long-test-password-123"},
     )
 
     assert response.status_code == 400
@@ -178,7 +178,7 @@ def test_expired_verification_token_is_rejected(
 
     response = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     assert response.status_code == 400
@@ -203,12 +203,12 @@ def test_verification_token_cannot_be_reused(
 
     first_response = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     second_response = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     assert first_response.status_code == 200
@@ -240,12 +240,12 @@ def test_resending_verification_rotates_previous_token(
 
     old_verification = client.post(
         "/auth/verify-email",
-        json={"token": old_token},
+        json={"token": old_token, "password": "a-long-test-password-123"},
     )
 
     new_verification = client.post(
         "/auth/verify-email",
-        json={"token": new_token},
+        json={"token": new_token, "password": "a-long-test-password-123"},
     )
 
     assert old_verification.status_code == 400
@@ -287,7 +287,7 @@ def test_resend_does_not_send_email_for_verified_account(
 
     verification = client.post(
         "/auth/verify-email",
-        json={"token": token},
+        json={"token": token, "password": "a-long-test-password-123"},
     )
 
     assert verification.status_code == 200

@@ -37,6 +37,44 @@ def _create_legacy_customers_table(connection):
         )
         """
     )
+    _create_legacy_job_tables(connection)
+
+
+def _create_legacy_job_tables(connection):
+    """Create the core jobs and service_reports tables (not Alembic-managed).
+
+    The worksheet migration (20261118_02) references both, as the real
+    database does.
+    """
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE jobs (
+            id INTEGER NOT NULL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            customer_id INTEGER NOT NULL,
+            title VARCHAR(160) NOT NULL,
+            trade_type VARCHAR(80) NOT NULL,
+            status VARCHAR(30) NOT NULL,
+            created_at DATETIME NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE
+        )
+        """
+    )
+    connection.exec_driver_sql(
+        """
+        CREATE TABLE service_reports (
+            id INTEGER NOT NULL PRIMARY KEY,
+            job_id INTEGER NOT NULL,
+            original_notes TEXT NOT NULL,
+            generated_content TEXT NOT NULL,
+            status VARCHAR(20) NOT NULL,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL,
+            FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+        )
+        """
+    )
 
 
 def _customer_email_index_exists(connection):
@@ -947,7 +985,7 @@ def test_password_reset_migration_upgrade_and_downgrade(tmp_path):
                 )
             )
 
-            # Step back one revision: only the reset table goes away.
+            # Step back past the reset table (and the worksheet tables after it).
             command.downgrade(config, "20261104_01")
             downgraded = set(inspect(connection).get_table_names())
             assert "password_reset_tokens" not in downgraded
@@ -956,6 +994,76 @@ def test_password_reset_migration_upgrade_and_downgrade(tmp_path):
             # Re-applying works after a downgrade.
             command.upgrade(config, "head")
             assert "password_reset_tokens" in inspect(connection).get_table_names()
+
+    finally:
+        test_engine.dispose()
+
+
+def test_trade_worksheet_migration_upgrade_and_downgrade(tmp_path):
+    """Worksheet tables are created at head and removed on downgrade."""
+    database = tmp_path / "worksheet-migration.db"
+    test_engine = create_engine(f"sqlite:///{database}")
+
+    try:
+        with test_engine.begin() as connection:
+            connection.exec_driver_sql(
+                """
+                CREATE TABLE users (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    email VARCHAR(320) NOT NULL UNIQUE,
+                    password_hash VARCHAR(255) NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            _create_legacy_customers_table(connection)
+
+            config = _config()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+
+            inspector = inspect(connection)
+            tables = set(inspector.get_table_names())
+            assert {
+                "job_worksheets",
+                "worksheet_sketches",
+                "report_worksheet_snapshots",
+            } <= tables
+
+            assert {c["name"] for c in inspector.get_columns("job_worksheets")} == {
+                "id", "job_id", "trade", "data", "notes", "created_at", "updated_at",
+            }
+            assert {c["name"] for c in inspector.get_columns("worksheet_sketches")} == {
+                "id", "job_id", "subject", "content_type", "image", "size_bytes",
+                "width", "height", "sha256", "created_at",
+            }
+            for table, column, target in (
+                ("job_worksheets", "job_id", "jobs"),
+                ("worksheet_sketches", "job_id", "jobs"),
+                ("report_worksheet_snapshots", "report_id", "service_reports"),
+            ):
+                assert any(
+                    fk["referred_table"] == target
+                    and fk["constrained_columns"] == [column]
+                    and fk["options"].get("ondelete") == "CASCADE"
+                    for fk in inspector.get_foreign_keys(table)
+                ), table
+            assert any(
+                constraint["column_names"] == ["job_id"]
+                for constraint in inspector.get_unique_constraints("job_worksheets")
+            )
+
+            command.downgrade(config, "20261118_01")
+            remaining = set(inspect(connection).get_table_names())
+            assert not {
+                "job_worksheets",
+                "worksheet_sketches",
+                "report_worksheet_snapshots",
+            } & remaining
+            assert {"jobs", "service_reports", "password_reset_tokens"} <= remaining
+
+            command.upgrade(config, "head")
+            assert "job_worksheets" in inspect(connection).get_table_names()
 
     finally:
         test_engine.dispose()

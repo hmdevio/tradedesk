@@ -306,7 +306,10 @@ def test_reset_verifies_unverified_account_and_voids_verification_links(
         "/auth/login", json={"email": email, "password": "owners-real-password-1"}
     )
     assert login.status_code == 200
-    stale = client.post("/auth/verify-email", json={"token": verification_token})
+    stale = client.post(
+        "/auth/verify-email",
+        json={"token": verification_token, "password": "owners-real-password-1"},
+    )
     assert stale.status_code == 400
 
 
