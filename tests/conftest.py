@@ -12,6 +12,10 @@ os.close(_fd)
 os.environ["DATABASE_URL"] = f"sqlite:///{_path}"
 os.environ["SECRET_KEY"] = "test-only-secret-key-that-is-not-for-production"
 os.environ["ENVIRONMENT"] = "test"
+# Keep tests independent of a developer's Redis: without this, REDIS_URL from
+# .env made every auth request wait for a Redis connection (about 10 minutes
+# per run on Windows when Redis was not running).
+os.environ["REDIS_URL"] = ""
 
 from fastapi.testclient import TestClient
 
@@ -75,7 +79,7 @@ def register_verified_user(client, verification_emails):
 
         verification = client.post(
             "/auth/verify-email",
-            json={"token": verification_token},
+            json={"token": verification_token, "password": password},
         )
 
         assert verification.status_code == 200
@@ -125,7 +129,7 @@ def account(client, verification_emails):
 
     verification = client.post(
         "/auth/verify-email",
-        json={"token": verification_token},
+        json={"token": verification_token, "password": password},
     )
 
     assert verification.status_code == 200

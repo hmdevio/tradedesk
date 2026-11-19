@@ -55,3 +55,13 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .session-banner { display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-bottom: 1rem; border-radius: 8px; padding: .7rem 1rem; background: #fef3c7; color: #78350f; }
 .record-row { display: flex; gap: .75rem; justify-content: space-between; align-items: center; flex-wrap: wrap; }
 @media (max-width: 760px) { .dashboard-grid { grid-template-columns: 1fr; } .wide { grid-column: auto; } .topbar { align-items: flex-start; } }
+
+/* Trade worksheets and sketches (Phase 2c) */
+.two-col { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.two-col .button-row { align-self: end; }
+.worksheet-fields { display: grid; gap: .75rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.worksheet-fields .full { grid-column: 1 / -1; }
+.sketch-grid { list-style: none; padding: 0; margin: 1rem 0 0; display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.sketch-card { border: 1px solid #d7dde3; border-radius: 8px; padding: .6rem; background: #fff; display: grid; gap: .4rem; }
+.sketch-card img { width: 100%; height: 150px; object-fit: contain; background: #f3f6f8; border-radius: 4px; }
+.sketch-card .tag { font-size: .8rem; color: #14532d; }

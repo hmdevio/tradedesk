@@ -7,7 +7,7 @@ Report content is stored as a JSON object of named sections. All user text is
 XML-escaped before it reaches ReportLab, because ReportLab paragraphs interpret
 markup (including <img> tags that can read local files).
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 import io
@@ -20,9 +20,11 @@ from reportlab.lib.enums import TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
+    Image as PdfImage,
     KeepTogether,
     Paragraph,
     SimpleDocTemplate,
@@ -137,6 +139,21 @@ def report_sections(content: str) -> list[tuple[str, str]]:
 
 
 @dataclass
+class PrintedWorksheet:
+    """A trade worksheet as printed: trade label, (label, value) rows, notes."""
+
+    trade_label: str
+    rows: list[tuple[str, str]]
+    notes: str | None
+
+
+@dataclass
+class PrintedSketch:
+    subject: str
+    image: bytes
+
+
+@dataclass
 class ReportContext:
     """Everything printed on a client-facing service report."""
 
@@ -152,6 +169,8 @@ class ReportContext:
     approved_at: datetime
     content: str
     original_notes: str
+    worksheet: PrintedWorksheet | None = None
+    sketches: list[PrintedSketch] = field(default_factory=list)
 
 
 FONT_DIR = Path(__file__).parent / "fonts"
@@ -186,6 +205,51 @@ def _para(text: str, style: ParagraphStyle) -> Paragraph:
     """Escape user text for ReportLab markup and keep line breaks."""
     safe = _html_escape(_supported(text, style.fontName), quote=False)
     return Paragraph(safe.replace("\n", "<br/>"), style)
+
+
+def _worksheet_flowables(worksheet, heading, base, label, avail):
+    """Worksheet as a two-column table of filled-in fields, then notes."""
+    flowables = [_para(f"{worksheet.trade_label} worksheet", heading)]
+    if worksheet.rows:
+        table = Table(
+            [[_para(name, label), _para(value, base)] for name, value in worksheet.rows],
+            colWidths=[avail * 0.38, avail * 0.62],
+        )
+        table.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#d7dde3")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        flowables.append(table)
+    if worksheet.notes:
+        flowables += [Spacer(1, 6), _para(worksheet.notes, base)]
+    return flowables
+
+
+MAX_SKETCH_HEIGHT = 4.5 * inch
+
+
+def _sketch_flowables(sketch, heading, small, avail):
+    """One sketch scaled to fit the page width, with its subject as caption."""
+    try:
+        reader = ImageReader(io.BytesIO(sketch.image))
+        width, height = reader.getSize()
+    except Exception:
+        # A stored image that can't be read is left off rather than
+        # failing the whole report.
+        return []
+    # Fit the page; small images may be enlarged at most 2x.
+    scale = min(avail / width, MAX_SKETCH_HEIGHT / height, 2.0)
+    picture = PdfImage(
+        io.BytesIO(sketch.image), width=width * scale, height=height * scale
+    )
+    picture.hAlign = "LEFT"
+    return [KeepTogether([
+        _para(f"Sketch: {sketch.subject}", heading),
+        picture,
+    ])]
 
 
 def _date(value: datetime) -> str:
@@ -272,6 +336,11 @@ def create_pdf(ctx: ReportContext) -> bytes:
     for section_heading, text in sections:
         story.append(_para(section_heading, heading))
         story.append(_para(text, base))
+
+    if ctx.worksheet is not None:
+        story += _worksheet_flowables(ctx.worksheet, heading, base, label, avail)
+    for sketch in ctx.sketches:
+        story += _sketch_flowables(sketch, heading, small, avail)
 
     # Separate signature and date lines with gaps between them.
     gap = 0.2 * inch

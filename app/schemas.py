@@ -102,6 +102,9 @@ class UserLogin(BaseModel):
 
 class EmailVerificationRequest(BaseModel):
     token: str = Field(min_length=32, max_length=256)
+    # The password chosen at registration (Phase 2b): proves the person
+    # finishing verification is the person who registered.
+    password: str = Field(min_length=1, max_length=128)
 
 
 class EmailRequest(BaseModel):
@@ -247,3 +250,50 @@ class TaskOut(BaseModel):
     due_at: datetime | None
     status: str
     created_at: datetime
+
+
+# Trade worksheet schemas (Phase 2c)
+
+
+class WorksheetIn(BaseModel):
+    # Values are checked against the trade's template in app/worksheets.py.
+    trade: str = Field(min_length=1, max_length=40)
+    values: dict[str, Any] = Field(default_factory=dict)
+    notes: str | None = Field(default=None, max_length=4000)
+
+
+class WorksheetOut(BaseModel):
+    job_id: int
+    trade: str
+    trade_label: str
+    values: dict[str, Any]
+    notes: str | None
+    updated_at: datetime
+
+
+SketchSubject = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=120),
+]
+
+
+class SketchCreate(BaseModel):
+    subject: SketchSubject
+    # A data URL (data:image/png;base64,...). 5 MB of image is about 7 MB
+    # of base64 text; the server checks the decoded size exactly.
+    image: str = Field(min_length=1, max_length=7_200_000)
+
+
+class SketchOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    job_id: int
+    subject: str
+    content_type: str
+    size_bytes: int
+    width: int
+    height: int
+    created_at: datetime
+    # True when an approved report includes this sketch; it can't be deleted.
+    locked: bool = False

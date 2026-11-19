@@ -45,6 +45,11 @@
       <p id="verificationMessage" class="muted">
         Check your email for a verification link before signing in.
       </p>
+      <form id="verifyConfirmForm" class="form-grid hidden">
+        <label>Password <input name="password" type="password" autocomplete="current-password" maxlength="128" required></label>
+        <p class="muted">Enter the password you chose when you created the account. This confirms the account is yours.</p>
+        <button type="submit">Confirm email</button>
+      </form>
       <form id="resendVerificationForm" class="form-grid">
         <label>Email <input name="email" type="email" autocomplete="email" required maxlength="320"></label>
         <button type="submit">Resend verification email</button>
@@ -162,6 +167,41 @@
             <button type="submit">Add task</button>
           </form>
           <ul id="taskList" class="record-list"></ul>
+        </section>
+
+        <section class="panel wide">
+          <h2>5. Trade worksheet and sketches</h2>
+          <p class="muted">Record trade-specific details for a job. Saved worksheets and sketches print on the job's reports when they are approved.</p>
+          <div class="form-grid two-col">
+            <label>Job
+              <select id="worksheetJob">
+                <option value="">Create a job first</option>
+              </select>
+            </label>
+            <label>Trade
+              <select id="worksheetTrade"></select>
+            </label>
+          </div>
+          <form id="worksheetForm" class="form-grid">
+            <div id="worksheetFields" class="worksheet-fields"></div>
+            <label>Notes <textarea name="notes" rows="3" maxlength="4000"></textarea></label>
+            <p id="worksheetStatus" class="muted"></p>
+            <div class="button-row">
+              <button type="submit">Save worksheet</button>
+              <button type="button" id="clearWorksheetButton" class="secondary">Clear worksheet</button>
+            </div>
+          </form>
+
+          <h3>Sketches and plot drawings</h3>
+          <form id="sketchForm" class="form-grid two-col">
+            <label>Subject <input name="subject" required maxlength="120" placeholder="Kitchen outlet layout"></label>
+            <label>Image (PNG, JPEG or WebP, up to 5 MB)
+              <input name="file" type="file" accept="image/png,image/jpeg,image/webp" required>
+            </label>
+            <div class="button-row"><button type="submit">Upload sketch</button></div>
+          </form>
+          <p class="muted">Photos are re-saved without location data. Up to 10 sketches per job.</p>
+          <ul id="sketchList" class="sketch-grid"></ul>
         </section>
       </div>
     </section>

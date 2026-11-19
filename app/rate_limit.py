@@ -69,13 +69,27 @@ def _is_production(settings) -> bool:
     return settings.environment.strip().lower() == "production"
 
 
-def enforce_rate_limit(request: Request, bucket: str, limit: int, window_seconds: int) -> None:
+def enforce_rate_limit(
+    request: Request,
+    bucket: str,
+    limit: int,
+    window_seconds: int,
+    subject: str | None = None,
+) -> None:
+    """Count one request against a fixed window and raise 429 over the limit.
+
+    By default the counter is per client IP. Pass ``subject`` (for example a
+    normalized email or a user ID) to count per account instead, so attempts
+    spread across many IPs still share one limit (audit finding S9). The
+    subject is HMAC-hashed like the IP, so Redis never holds raw emails.
+    """
     settings = get_settings()
     if not settings.redis_url:
         if _is_production(settings):
             raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable")
         return
-    key = f"tradedesk:rate-limit:{bucket}:{_client_key_digest(client_ip(request))}"
+    identity = f"subject:{subject}" if subject is not None else client_ip(request)
+    key = f"tradedesk:rate-limit:{bucket}:{_client_key_digest(identity)}"
     try:
         count, ttl = get_redis_client().eval(_INCREMENT_WITH_TTL, 1, key, window_seconds)
     except Exception:

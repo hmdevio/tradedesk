@@ -26,12 +26,22 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_access_token(user_id: int, session_id: str, expires_at: datetime) -> str:
-    """Create a JWT tied to a persisted, revocable server-side session."""
+def create_access_token(
+    user_id: int,
+    session_id: str,
+    expires_at: datetime,
+    auth_time: datetime,
+) -> str:
+    """Create a JWT tied to a persisted, revocable server-side session.
+
+    ``auth_time`` is when the user last entered their password. Renewals copy
+    it forward, so the absolute session limit counts from the real sign-in.
+    """
     payload = {
         "sub": str(user_id),
         "jti": str(UUID(session_id)),
         "iat": datetime.now(expires_at.tzinfo),
         "exp": expires_at,
+        "auth_time": int(auth_time.timestamp()),
     }
     return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)

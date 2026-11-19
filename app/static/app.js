@@ -6,6 +6,8 @@
 
 const SESSION_WARNING_SECONDS = 120;
 const DRAFT_PREFIX = "tradedesk-draft:";
+// The API returns at most 200 rows per request (Phase 2b pagination).
+const LIST_LIMIT = 200;
 const REPORT_SECTIONS = [
   "work_performed",
   "findings_observations",
@@ -24,6 +26,13 @@ let accountKey = null;
 let customers = [];
 let jobs = [];
 let activeReport = null;
+let verifyToken = null;
+let worksheetTemplates = [];
+let sketchUrls = [];
+// Only the latest worksheet/sketch load may update the panel; an older
+// request that finishes late is ignored (prevents duplicate cards).
+let worksheetLoadSeq = 0;
+let sketchLoadSeq = 0;
 let warningTimer = null;
 let expiryTimer = null;
 
@@ -120,6 +129,7 @@ function showPanel(id) {
 function showVerificationPanel(message) {
   showPanel("#verificationPanel");
   $("#verificationMessage").textContent = message;
+  if (!verifyToken) $("#verifyConfirmForm").classList.add("hidden");
 }
 
 for (const button of $$(".back-to-sign-in")) {
@@ -198,10 +208,12 @@ function clearAccountUi() {
   for (const list of ["#customerList", "#jobList", "#taskList", "#reportHistory"]) {
     $(list).replaceChildren();
   }
+  clearWorksheetUi();
+  resetSelect($("#worksheetJob"), "Create a job first");
   resetSelect($("#jobCustomer"), "Create a customer first");
   resetSelect($("#reportJob"), "Create a job first");
   resetSelect($("#taskJob"), "Create a job first");
-  for (const form of ["#customerForm", "#jobForm", "#reportForm", "#taskForm", "#authForm", "#resetForm"]) {
+  for (const form of ["#customerForm", "#jobForm", "#reportForm", "#taskForm", "#authForm", "#resetForm", "#verifyConfirmForm"]) {
     $(form).reset();
   }
   for (const section of REPORT_SECTIONS) $(`#section_${section}`).value = "";
@@ -357,21 +369,46 @@ async function handleLinkFragment() {
     return;
   }
 
-  showVerificationPanel("Verifying your email address...");
+  // Phase 2b: verification asks for the account's password, so a person who
+  // receives a link for an account they never created cannot confirm it.
+  verifyToken = token;
+  showVerificationPanel("Almost done. Enter your password to confirm your email address.");
+  $("#verifyConfirmForm").classList.remove("hidden");
+  $("#verifyConfirmForm").elements.password.focus();
+}
+
+$("#verifyConfirmForm").addEventListener("submit", guarded(async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const { password } = formObject(form);
   try {
-    await api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) });
+    await api("/auth/verify-email", {
+      method: "POST",
+      body: JSON.stringify({ token: verifyToken, password }),
+    });
+    verifyToken = null;
+    form.reset();
+    form.classList.add("hidden");
     showPanel("#authPanel");
     showNotice("Email verified successfully. You can now sign in.");
-  } catch {
+  } catch (error) {
+    form.elements.password.value = "";
+    if (error.message && error.message.includes("password")) {
+      // Wrong password: the link still works, so let them try again.
+      showNotice(error.message, "error");
+      return;
+    }
+    verifyToken = null;
+    form.classList.add("hidden");
     showVerificationPanel("This verification link is invalid or expired. You can request a new link below.");
     showNotice("Email verification could not be completed.", "error");
   }
-}
+}));
 
 // Customers and jobs
 
 async function refreshCustomers() {
-  customers = await api("/customers");
+  customers = await api(`/customers?limit=${LIST_LIMIT}`);
   $("#customerList").replaceChildren();
   const select = $("#jobCustomer");
   select.replaceChildren();
@@ -397,8 +434,8 @@ function jobLabel(job) {
 }
 
 async function refreshJobs() {
-  jobs = await api("/jobs");
-  for (const selector of ["#reportJob", "#taskJob"]) {
+  jobs = await api(`/jobs?limit=${LIST_LIMIT}`);
+  for (const selector of ["#reportJob", "#taskJob", "#worksheetJob"]) {
     const select = $(selector);
     const previous = select.value;
     select.replaceChildren();
@@ -419,6 +456,8 @@ async function refreshAll() {
   await refreshJobs();
   await refreshReportHistory($("#reportJob").value);
   await refreshTasks($("#taskJob").value);
+  await loadWorksheetTemplates();
+  await loadWorksheet($("#worksheetJob").value);
 }
 
 $("#customerForm").addEventListener("submit", guarded(async (event) => {
@@ -449,7 +488,10 @@ $("#jobForm").addEventListener("submit", guarded(async (event) => {
   try {
     await api("/jobs", { method: "POST", body: JSON.stringify(data) });
     form.reset();
+    const worksheetJobBefore = $("#worksheetJob").value;
     await refreshJobs();
+    // Load the worksheet panel when this is the first job (its selection changed).
+    if ($("#worksheetJob").value !== worksheetJobBefore) await loadWorksheet($("#worksheetJob").value);
     await refreshReportHistory($("#reportJob").value);
     await refreshTasks($("#taskJob").value);
     showNotice("Job saved.");
@@ -728,3 +770,270 @@ showPanel("#authPanel");
 handleLinkFragment();
 // Links opened in an already-open TradeDesk tab change only the fragment.
 window.addEventListener("hashchange", handleLinkFragment);
+
+// Trade worksheets and sketches (Phase 2c)
+
+const MAX_SKETCH_BYTES = 5 * 1024 * 1024;
+const SKETCH_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+
+// Pre-select a trade from the job's free-text trade type.
+const TRADE_HINTS = [
+  [/electric/i, "electrician"],
+  [/plumb/i, "plumber"],
+  [/hvac|heat|cool|air.?cond|furnace|refrig/i, "hvac"],
+  [/carpent|wood|fram|deck|cabinet|trim/i, "carpenter"],
+  [/weld|fabricat/i, "welder"],
+  [/mechanic|auto|diesel|vehicle|truck|engine|car\b/i, "mechanic"],
+];
+
+function guessTrade(job) {
+  const text = job ? job.trade_type : "";
+  const hit = TRADE_HINTS.find(([pattern]) => pattern.test(text));
+  return hit ? hit[1] : worksheetTemplates[0]?.key;
+}
+
+async function loadWorksheetTemplates() {
+  if (!worksheetTemplates.length) worksheetTemplates = await api("/worksheet-templates");
+  const select = $("#worksheetTrade");
+  if (select.options.length) return;
+  for (const template of worksheetTemplates) addOption(select, template.key, template.label);
+}
+
+function revokeSketchUrls() {
+  for (const url of sketchUrls) URL.revokeObjectURL(url);
+  sketchUrls = [];
+}
+
+function clearWorksheetUi() {
+  revokeSketchUrls();
+  $("#worksheetFields").replaceChildren();
+  $("#sketchList").replaceChildren();
+  $("#worksheetForm").reset();
+  $("#sketchForm").reset();
+  $("#worksheetStatus").textContent = "";
+}
+
+function fieldLabel(field) {
+  return field.unit ? `${field.label} (${field.unit})` : field.label;
+}
+
+function buildField(field, value) {
+  const label = document.createElement("label");
+  label.textContent = fieldLabel(field) + " ";
+  let input;
+  if (field.type === "textarea") {
+    input = document.createElement("textarea");
+    input.rows = 3;
+    input.maxLength = field.max_length;
+    label.classList.add("full");
+  } else if (field.type === "select" || field.type === "boolean") {
+    input = document.createElement("select");
+    addOption(input, "", "—");
+    const options = field.type === "boolean" ? [["true", "Yes"], ["false", "No"]] : field.options.map((o) => [o, o]);
+    for (const [optionValue, text] of options) addOption(input, optionValue, text);
+  } else {
+    input = document.createElement("input");
+    if (field.type === "number") {
+      input.type = "number";
+      input.step = "any";
+      input.min = String(field.min);
+      input.max = String(field.max);
+    } else {
+      input.maxLength = field.max_length;
+    }
+  }
+  input.name = field.key;
+  input.dataset.kind = field.type;
+  if (value !== undefined && value !== null) input.value = String(value);
+  label.append(input);
+  return label;
+}
+
+function renderWorksheetFields(tradeKey, values = {}) {
+  const container = $("#worksheetFields");
+  container.replaceChildren();
+  const template = worksheetTemplates.find((t) => t.key === tradeKey);
+  if (!template) return;
+  for (const field of template.fields) container.append(buildField(field, values[field.key]));
+}
+
+function readWorksheetValues() {
+  const values = {};
+  for (const input of $$("#worksheetFields [name]")) {
+    const raw = input.value.trim();
+    if (!raw) continue;
+    if (input.dataset.kind === "number") values[input.name] = Number(raw);
+    else if (input.dataset.kind === "boolean") values[input.name] = raw === "true";
+    else values[input.name] = raw;
+  }
+  return values;
+}
+
+async function loadWorksheet(jobId) {
+  const seq = ++worksheetLoadSeq;
+  clearWorksheetUi();
+  if (!jobId || !worksheetTemplates.length) return;
+  const worksheet = await api(`/jobs/${encodeURIComponent(jobId)}/worksheet`);
+  if (seq !== worksheetLoadSeq) return;
+  const job = jobs.find((item) => String(item.id) === String(jobId));
+  const trade = worksheet ? worksheet.trade : guessTrade(job);
+  $("#worksheetTrade").value = trade;
+  renderWorksheetFields(trade, worksheet ? worksheet.values : {});
+  $("#worksheetForm").elements.notes.value = worksheet?.notes || "";
+  $("#worksheetStatus").textContent = worksheet
+    ? `Last saved ${formatDate(worksheet.updated_at)}.`
+    : "Not saved yet.";
+  await refreshSketches(jobId);
+}
+
+$("#worksheetJob").addEventListener("change", async (event) => {
+  try { await loadWorksheet(event.currentTarget.value); }
+  catch (error) { reportError(error, "Unable to load the worksheet."); }
+});
+
+$("#worksheetTrade").addEventListener("change", (event) => {
+  // Switching trade starts that trade's fields empty; nothing is saved
+  // until "Save worksheet".
+  renderWorksheetFields(event.currentTarget.value);
+  $("#worksheetStatus").textContent = "Trade changed. Save to keep it.";
+});
+
+$("#worksheetForm").addEventListener("submit", guarded(async (event) => {
+  event.preventDefault();
+  const jobId = $("#worksheetJob").value;
+  if (!jobId) return showNotice("Choose a job first.", "error");
+  try {
+    const saved = await api(`/jobs/${encodeURIComponent(jobId)}/worksheet`, {
+      method: "PUT",
+      body: JSON.stringify({
+        trade: $("#worksheetTrade").value,
+        values: readWorksheetValues(),
+        notes: event.currentTarget.elements.notes.value.trim() || null,
+      }),
+    });
+    renderWorksheetFields(saved.trade, saved.values);
+    $("#worksheetStatus").textContent = `Last saved ${formatDate(saved.updated_at)}.`;
+    showNotice(`${saved.trade_label} worksheet saved.`);
+  } catch (error) {
+    reportError(error, "Unable to save the worksheet.");
+  }
+}));
+
+$("#clearWorksheetButton").addEventListener("click", guarded(async () => {
+  const jobId = $("#worksheetJob").value;
+  if (!jobId) return;
+  if (!window.confirm("Clear this job's worksheet? Reports already approved keep their copy.")) return;
+  try {
+    await api(`/jobs/${encodeURIComponent(jobId)}/worksheet`, { method: "DELETE" });
+    await loadWorksheet(jobId);
+    showNotice("Worksheet cleared.");
+  } catch (error) {
+    reportError(error, "Unable to clear the worksheet.");
+  }
+}));
+
+async function sketchBlobUrl(sketchId) {
+  const response = await fetch(`/sketches/${encodeURIComponent(sketchId)}/image`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (response.status === 401) {
+    endSession({ expired: true });
+    throw new SessionExpiredError("Your session ended. Sign in again to continue.");
+  }
+  if (!response.ok) throw new Error("Unable to load a sketch.");
+  const url = URL.createObjectURL(await response.blob());
+  sketchUrls.push(url);
+  return url;
+}
+
+async function refreshSketches(jobId) {
+  const seq = ++sketchLoadSeq;
+  const list = $("#sketchList");
+  if (!jobId) {
+    revokeSketchUrls();
+    list.replaceChildren();
+    return;
+  }
+  const sketches = await api(`/jobs/${encodeURIComponent(jobId)}/sketches`);
+  if (seq !== sketchLoadSeq) return;
+  revokeSketchUrls();
+  list.replaceChildren();
+  if (!sketches.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "No sketches for this job yet.";
+    list.append(empty);
+    return;
+  }
+  for (const sketch of sketches) {
+    const card = document.createElement("li");
+    card.className = "sketch-card";
+    const image = document.createElement("img");
+    image.alt = sketch.subject;
+    const subject = document.createElement("strong");
+    subject.textContent = sketch.subject;
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = `${sketch.width} × ${sketch.height} · ${formatDate(sketch.created_at)}`;
+    card.append(image, subject, meta);
+    if (sketch.locked) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "In an approved report";
+      card.append(tag);
+    } else {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "secondary";
+      remove.textContent = "Delete";
+      remove.setAttribute("aria-label", `Delete sketch "${sketch.subject}"`);
+      remove.addEventListener("click", guarded(async () => {
+        if (!window.confirm(`Delete the sketch "${sketch.subject}"?`)) return;
+        try {
+          await api(`/sketches/${encodeURIComponent(sketch.id)}`, { method: "DELETE" });
+          await refreshSketches(jobId);
+          showNotice("Sketch deleted.");
+        } catch (error) {
+          reportError(error, "Unable to delete the sketch.");
+        }
+      }));
+      card.append(remove);
+    }
+    list.append(card);
+    sketchBlobUrl(sketch.id).then((url) => { image.src = url; }).catch(() => {});
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("The file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+$("#sketchForm").addEventListener("submit", guarded(async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const jobId = $("#worksheetJob").value;
+  const file = form.elements.file.files[0];
+  if (!jobId) return showNotice("Choose a job first.", "error");
+  if (!file) return showNotice("Choose an image to upload.", "error");
+  if (!SKETCH_TYPES.has(file.type)) return showNotice("The sketch must be a PNG, JPEG or WebP image.", "error");
+  if (file.size > MAX_SKETCH_BYTES) return showNotice("The sketch must be 5 MB or smaller.", "error");
+  try {
+    await api(`/jobs/${encodeURIComponent(jobId)}/sketches`, {
+      method: "POST",
+      body: JSON.stringify({
+        subject: form.elements.subject.value.trim(),
+        image: await readFileAsDataUrl(file),
+      }),
+    });
+    form.reset();
+    await refreshSketches(jobId);
+    showNotice("Sketch uploaded.");
+  } catch (error) {
+    reportError(error, "Unable to upload the sketch.");
+  }
+}));

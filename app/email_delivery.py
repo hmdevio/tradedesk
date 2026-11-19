@@ -30,7 +30,10 @@ def send_verification_email(recipient: str, token: str) -> None:
         "Verify your TradeDesk email",
         "Verify your TradeDesk email address by opening this link:\n"
         + link
-        + "\n\nIf you did not create this account, you can ignore this message.",
+        + "\n\nYou will be asked for the password you chose when you "
+        "created the account."
+        + "\n\nIf you did not create this account, you can ignore this "
+        "message. Without that password the account cannot be confirmed.",
     )
 
 

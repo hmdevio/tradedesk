@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     Index,
@@ -258,6 +259,17 @@ class Job(Base):
         cascade="all, delete-orphan",
     )
 
+    worksheet: Mapped["JobWorksheet | None"] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+    sketches: Mapped[list["WorksheetSketch"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
 
 class ServiceReport(Base):
     __tablename__ = "service_reports"
@@ -283,6 +295,10 @@ class ServiceReport(Base):
         nullable=False,
     )
     job: Mapped[Job] = relationship(back_populates="reports")
+    worksheet_snapshot: Mapped["ReportWorksheetSnapshot | None"] = relationship(
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class Task(Base):
@@ -325,3 +341,82 @@ class Task(Base):
     )
 
     job: Mapped[Job] = relationship(back_populates="tasks")
+
+
+class JobWorksheet(Base):
+    """One trade-specific worksheet per job.
+
+    ``data`` is a JSON object whose keys come from the trade's template in
+    app/worksheets.py; the API validates every value before saving.
+    """
+
+    __tablename__ = "job_worksheets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        unique=True,
+        nullable=False,
+    )
+    trade: Mapped[str] = mapped_column(String(40), nullable=False)
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=utc_now,
+        onupdate=utc_now,
+        nullable=False,
+    )
+
+    job: Mapped[Job] = relationship(back_populates="worksheet")
+
+
+class WorksheetSketch(Base):
+    """A sketch or plot drawing attached to a job, with a subject line.
+
+    Images are re-encoded by the server before storage (metadata such as
+    GPS location is dropped) and are served only to the job's owner.
+    """
+
+    __tablename__ = "worksheet_sketches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(
+        ForeignKey("jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    subject: Mapped[str] = mapped_column(String(120), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    image: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+    job: Mapped[Job] = relationship(back_populates="sketches")
+
+
+class ReportWorksheetSnapshot(Base):
+    """The worksheet as it stood when a report was approved.
+
+    An approved PDF prints this copy, so later worksheet edits cannot change
+    a report the customer has already received.
+    """
+
+    __tablename__ = "report_worksheet_snapshots"
+
+    report_id: Mapped[int] = mapped_column(
+        ForeignKey("service_reports.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )

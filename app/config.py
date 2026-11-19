@@ -13,6 +13,12 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+ALLOWED_ENVIRONMENTS = {"development", "test", "production"}
+MIN_SECRET_KEY_LENGTH = 32
+# Values copied from .env.example must never run.
+PLACEHOLDER_SECRETS = {"replace-with-a-long-random-secret-before-running"}
+
+
 class Settings(BaseSettings):
     """Typed settings loaded from environment variables and optional .env."""
 
@@ -23,10 +29,16 @@ class Settings(BaseSettings):
     )
 
     app_name: str = "TradeDesk"
-    environment: str = "development"
+    # No default (audit finding S5): a missing ENVIRONMENT used to mean
+    # "development", which silently allowed an empty SECRET_KEY, open /docs
+    # and no rate limiting. It must now be set explicitly.
+    environment: str | None = None
     secret_key: str = str()
     database_url: str = "sqlite:///./tradedesk.db"
     access_token_minutes: int = 30
+    # Absolute session lifetime: "Stay signed in" can renew a session only
+    # until this many hours after the original sign-in.
+    session_max_hours: int = 12
     cors_origins: str = ""
     redis_url: str = ""
     trusted_proxy_cidrs: str = ""
@@ -59,6 +71,34 @@ class Settings(BaseSettings):
             for origin in self.cors_origins.split(",")
             if origin.strip()
         ]
+
+    @model_validator(mode="after")
+    def validate_core_configuration(self) -> "Settings":
+        """Refuse to start with unsafe defaults (audit finding S5)."""
+        environment = (self.environment or "").strip().lower()
+        if environment not in ALLOWED_ENVIRONMENTS:
+            raise ValueError(
+                "ENVIRONMENT must be set to one of: "
+                + ", ".join(sorted(ALLOWED_ENVIRONMENTS))
+            )
+        self.environment = environment
+
+        secret = self.secret_key.strip()
+        if len(secret) < MIN_SECRET_KEY_LENGTH or secret in PLACEHOLDER_SECRETS:
+            raise ValueError(
+                f"SECRET_KEY must be a random value of at least "
+                f"{MIN_SECRET_KEY_LENGTH} characters in every environment"
+            )
+
+        if self.access_token_minutes <= 0:
+            raise ValueError("ACCESS_TOKEN_MINUTES must be greater than zero")
+        if self.session_max_hours <= 0:
+            raise ValueError("SESSION_MAX_HOURS must be greater than zero")
+        if self.access_token_minutes > self.session_max_hours * 60:
+            raise ValueError(
+                "ACCESS_TOKEN_MINUTES cannot exceed SESSION_MAX_HOURS"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_email_configuration(self) -> "Settings":
