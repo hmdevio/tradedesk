@@ -1,0 +1,10 @@
+Copyright (c) 2026 PACCTECH LLC. All rights reserved.
+
+This repository is published so that its source code can be viewed and
+evaluated. No license is granted to use, copy, modify, merge, publish,
+distribute, sublicense or sell the software, in whole or in part, without
+prior written permission from PACCTECH LLC.
+
+Third-party components keep their own licenses. The DejaVu fonts in app/fonts
+are covered by app/fonts/DEJAVU_LICENSE.txt, and Python dependencies are
+installed from their own projects under their own licenses.

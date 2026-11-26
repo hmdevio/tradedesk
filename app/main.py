@@ -210,12 +210,13 @@ DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
 # including passwords, and the interface could only show "Request failed".
 # This handler drops the submitted values and returns one readable sentence
 # in "detail" plus a field list in "errors".
+# Display labels only, not credentials; the nosec marks tell Bandit (B105) so.
 FIELD_LABELS = {
     "email": "Email",
-    "password": "Password",
-    "current_password": "Current password",
-    "new_password": "New password",
-    "token": "Link",
+    "password": "Password",  # nosec B105
+    "current_password": "Current password",  # nosec B105
+    "new_password": "New password",  # nosec B105
+    "token": "Link",  # nosec B105
     "name": "Name",
     "phone": "Phone",
     "address": "Address",
