@@ -15,15 +15,19 @@ import base64
 import hashlib
 import json
 import logging
+import re
 import secrets
 from pathlib import Path
 from uuid import uuid4
+
+from typing import Annotated
 
 from fastapi import (
     BackgroundTasks,
     Depends,
     FastAPI,
     HTTPException,
+    Path as PathParam,
     Query,
     Request,
     Response,
@@ -90,6 +94,7 @@ from app.worksheets import (
     validate_values,
 )
 from app.schemas import (
+    MAX_RECORD_ID,
     BusinessProfileIn,
     BusinessProfileOut,
     CustomerCreate,
@@ -119,6 +124,10 @@ from app.schemas import (
     WorksheetIn,
     WorksheetOut,
 )
+
+# Record IDs in URLs must fit a PostgreSQL INTEGER; anything else is a 422,
+# not a database error.
+RecordId = Annotated[int, PathParam(ge=1, le=MAX_RECORD_ID)]
 from app.security import (
     ALGORITHM,
     create_access_token,
@@ -185,6 +194,28 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+# JSON can carry a NUL character as the escape \u0000. PostgreSQL refuses NUL
+# in text columns, so such a value would fail at the database with a 500.
+# Reject it up front with a 422. The pattern counts preceding backslashes so a
+# user who literally types "\u0000" (sent as \\u0000) is not affected.
+NUL_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u0000")
+BODY_METHODS = {"POST", "PUT", "PATCH"}
+
+
+@app.middleware("http")
+async def reject_nul_characters(request: Request, call_next):
+    if request.method in BODY_METHODS and "json" in request.headers.get("content-type", ""):
+        if NUL_ESCAPE.search(await request.body()):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": "Text cannot contain NUL characters.",
+                    "errors": [{"field": "body", "message": "Text cannot contain NUL characters."}],
+                },
+            )
+    return await call_next(request)
 
 
 # Browser security headers (audit finding S2).
@@ -1185,7 +1216,7 @@ PAGE_MAX = 200
 )
 def list_customers(
     limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_RECORD_ID),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1267,7 +1298,7 @@ def create_customer(
     response_model=CustomerOut,
 )
 def get_customer(
-    customer_id: int,
+    customer_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1283,7 +1314,7 @@ def get_customer(
     response_model=CustomerOut,
 )
 def update_customer(
-    customer_id: int,
+    customer_id: RecordId,
     payload: CustomerUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1356,7 +1387,7 @@ def update_customer(
     status_code=204,
 )
 def delete_customer(
-    customer_id: int,
+    customer_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1388,7 +1419,7 @@ def delete_customer(
     response_model=DeleteImpact,
 )
 def customer_delete_impact(
-    customer_id: int,
+    customer_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1440,7 +1471,7 @@ def _delete_impact(
 )
 def list_jobs(
     limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_RECORD_ID),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1524,7 +1555,7 @@ def create_job(
     response_model=JobOut,
 )
 def get_job(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1540,7 +1571,7 @@ def get_job(
     response_model=JobOut,
 )
 def update_job(
-    job_id: int,
+    job_id: RecordId,
     payload: JobUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1589,7 +1620,7 @@ def update_job(
     status_code=204,
 )
 def delete_job(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1619,7 +1650,7 @@ def delete_job(
     response_model=DeleteImpact,
 )
 def job_delete_impact(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1637,7 +1668,7 @@ def job_delete_impact(
     status_code=201,
 )
 def create_report_draft(
-    job_id: int,
+    job_id: RecordId,
     payload: ReportDraftRequest,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1675,9 +1706,9 @@ def create_report_draft(
     response_model=list[ReportOut],
 )
 def list_reports(
-    job_id: int,
+    job_id: RecordId,
     limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_RECORD_ID),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1704,7 +1735,7 @@ def list_reports(
     response_model=ReportOut,
 )
 def get_report(
-    report_id: int,
+    report_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1716,7 +1747,7 @@ def get_report(
     response_model=ReportOut,
 )
 def edit_report(
-    report_id: int,
+    report_id: RecordId,
     payload: ReportEdit,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1751,7 +1782,7 @@ def edit_report(
     response_model=ReportOut,
 )
 def approve_report(
-    report_id: int,
+    report_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1792,7 +1823,7 @@ def approve_report(
 
 @app.get("/reports/{report_id}/pdf")
 def export_report_pdf(
-    report_id: int,
+    report_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1859,9 +1890,9 @@ def export_report_pdf(
     response_model=list[TaskOut],
 )
 def list_tasks(
-    job_id: int,
+    job_id: RecordId,
     limit: int = Query(PAGE_DEFAULT, ge=1, le=PAGE_MAX),
-    offset: int = Query(0, ge=0),
+    offset: int = Query(0, ge=0, le=MAX_RECORD_ID),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -1892,7 +1923,7 @@ def list_tasks(
     status_code=201,
 )
 def create_task(
-    job_id: int,
+    job_id: RecordId,
     payload: TaskCreate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -1954,7 +1985,7 @@ def create_task(
     response_model=TaskOut,
 )
 def update_task(
-    task_id: int,
+    task_id: RecordId,
     payload: TaskUpdate,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -2003,7 +2034,7 @@ def update_task(
     status_code=204,
 )
 def delete_task(
-    task_id: int,
+    task_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -2132,7 +2163,7 @@ def worksheet_templates(
     response_model=WorksheetOut | None,
 )
 def get_worksheet(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -2149,7 +2180,7 @@ def get_worksheet(
     response_model=WorksheetOut,
 )
 def save_worksheet(
-    job_id: int,
+    job_id: RecordId,
     payload: WorksheetIn,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -2190,7 +2221,7 @@ def save_worksheet(
     status_code=204,
 )
 def delete_worksheet(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -2209,7 +2240,7 @@ def delete_worksheet(
     response_model=list[SketchOut],
 )
 def list_sketches(
-    job_id: int,
+    job_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -2231,7 +2262,7 @@ def list_sketches(
     status_code=201,
 )
 def upload_sketch(
-    job_id: int,
+    job_id: RecordId,
     payload: SketchCreate,
     request: Request,
     db: Session = Depends(get_db),
@@ -2298,7 +2329,7 @@ def owned_sketch(db: Session, sketch_id: int, user_id: int) -> WorksheetSketch:
 
 @app.get("/sketches/{sketch_id}/image")
 def sketch_image(
-    sketch_id: int,
+    sketch_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -2321,7 +2352,7 @@ def sketch_image(
     status_code=204,
 )
 def delete_sketch(
-    sketch_id: int,
+    sketch_id: RecordId,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
