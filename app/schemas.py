@@ -15,6 +15,10 @@ from pydantic import (
 )
 from typing_extensions import Annotated
 
+# Largest value of a PostgreSQL INTEGER column. IDs above it can never exist and
+# would make the database driver raise instead of returning "not found".
+MAX_RECORD_ID = 2_147_483_647
+
 
 ShortText = Annotated[
     str,
@@ -177,7 +181,7 @@ class DeleteImpact(BaseModel):
 
 
 class JobCreate(BaseModel):
-    customer_id: int = Field(gt=0)
+    customer_id: int = Field(gt=0, le=MAX_RECORD_ID)
     title: JobTitle
     trade_type: TradeType
     description: str | None = Field(default=None, max_length=4000)
