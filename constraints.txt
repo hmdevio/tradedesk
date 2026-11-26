@@ -20,7 +20,7 @@
 # Packages with compiled (.pyd) extensions
 argon2-cffi-bindings==26.2.0
 cffi==2.1.1
-charset-normalizer==3.5.2
+charset-normalizer==3.5.3
 httptools==0.9.0
 markupsafe==3.0.4
 pillow==13.0.0
