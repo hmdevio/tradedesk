@@ -11,6 +11,10 @@ updates:
         patterns:
           - "pydantic"
           - "pydantic-core"
+    ignore:
+      # Major upgrades are planned and tested by hand.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
