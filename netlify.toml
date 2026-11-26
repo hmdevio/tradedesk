@@ -1,0 +1,5 @@
+# Netlify hosts the static frontend only; the API runs elsewhere.
+# Set API_BASE_URL in Netlify (Site configuration > Environment variables).
+[build]
+  command = "python3 deploy/netlify_build.py"
+  publish = "dist"
