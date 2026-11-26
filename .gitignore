@@ -46,3 +46,20 @@ build/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Certificates, keys and signing requests
+*.csr
+*.der
+*.jks
+certs/
+
+# Archives, patches and logs that may contain data or credentials
+*.zip
+*.tgz
+*.tar.gz
+*.patch
+*.log
+
+# Folders created by local tools or clean-ups, never part of the app
+*outputs/
+_to_delete/
