@@ -175,14 +175,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def api_docs_settings(is_production: bool) -> dict:
+    """Interactive docs and the OpenAPI schema are for local development only.
+
+    In production all three are switched off: the schema (/openapi.json) is a
+    complete map of every route and field, so it must be hidden along with
+    the pages that display it (found by the live deployment check).
+    """
+    if is_production:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 app = FastAPI(
     title="TradeDesk API",
     description="AI-assisted job documentation for independent tradespeople.",
     version="0.1.0",
     lifespan=lifespan,
-    # Keep docs available for local development. Disable in production.
-    docs_url=None if IS_PRODUCTION else "/docs",
-    redoc_url=None if IS_PRODUCTION else "/redoc",
+    **api_docs_settings(IS_PRODUCTION),
 )
 
 
