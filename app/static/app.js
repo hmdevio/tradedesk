@@ -4,9 +4,6 @@
    /auth/refresh after an explicit "Stay signed in" prompt. */
 "use strict";
 
-// Where the API lives. Empty means the same site that served this page;
-// the Netlify build sets it in config.js to the hosted API address.
-const API_BASE = ((window.TRADEDESK_CONFIG || {}).apiBase || "").replace(/\/+$/, "");
 const SESSION_WARNING_SECONDS = 120;
 const DRAFT_PREFIX = "tradedesk-draft:";
 // The API returns at most 200 rows per request (Phase 2b pagination).
@@ -96,7 +93,7 @@ async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   const sentToken = accessToken;
   if (sentToken) headers.Authorization = `Bearer ${sentToken}`;
-  const response = await fetch(API_BASE + path, { ...options, headers });
+  const response = await fetch(path, { ...options, headers });
   if (response.status === 401 && sentToken) {
     endSession({ expired: true });
     throw new SessionExpiredError("Your session ended. Sign in again to continue.");
@@ -897,7 +894,7 @@ $("#approveReportButton").addEventListener("click", guarded(async () => {
 
 async function downloadPdf(reportId) {
   try {
-    const response = await fetch(`${API_BASE}/reports/${encodeURIComponent(reportId)}/pdf`, {
+    const response = await fetch(`/reports/${encodeURIComponent(reportId)}/pdf`, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (response.status === 401) {
@@ -1187,7 +1184,7 @@ $("#clearWorksheetButton").addEventListener("click", guarded(async () => {
 }));
 
 async function sketchBlobUrl(sketchId) {
-  const response = await fetch(`${API_BASE}/sketches/${encodeURIComponent(sketchId)}/image`, {
+  const response = await fetch(`/sketches/${encodeURIComponent(sketchId)}/image`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (response.status === 401) {
@@ -1313,7 +1310,7 @@ function showLogo(blob) {
 }
 
 async function loadLogo() {
-  const response = await fetch(`${API_BASE}/profile/logo`, { headers: { Authorization: `Bearer ${accessToken}` } });
+  const response = await fetch("/profile/logo", { headers: { Authorization: `Bearer ${accessToken}` } });
   showLogo(response.ok ? await response.blob() : null);
 }
 
