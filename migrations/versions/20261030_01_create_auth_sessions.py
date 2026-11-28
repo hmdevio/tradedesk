@@ -1,13 +1,13 @@
 """Create server-side authentication sessions.
 
 Revision ID: 20261030_01
-Revises:
+Revises: 20261029_00
 """
 from alembic import op
 import sqlalchemy as sa
 
 revision = "20261030_01"
-down_revision = None
+down_revision = "20261029_00"
 branch_labels = None
 depends_on = None
 

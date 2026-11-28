@@ -1113,3 +1113,40 @@ def test_business_profile_migration_upgrade_and_downgrade(tmp_path):
             assert "job_worksheets" in remaining
     finally:
         test_engine.dispose()
+
+
+def test_empty_database_builds_from_migrations_alone(tmp_path):
+    """A brand-new database must reach head with no tables created beforehand.
+
+    Regression test: the first deploy to a fresh hosted database failed
+    because the migrations assumed the pre-Alembic core tables already
+    existed. Every model table and column must exist after "upgrade head".
+    """
+    from app.database import Base
+    import app.models  # noqa: F401 - register every model with Base.metadata
+
+    database = tmp_path / "fresh.db"
+    test_engine = create_engine(f"sqlite:///{database}")
+
+    try:
+        with test_engine.begin() as connection:
+            config = _config()
+            config.attributes["connection"] = connection
+            command.upgrade(config, "head")
+
+            inspector = inspect(connection)
+            tables = set(inspector.get_table_names())
+            for table in Base.metadata.sorted_tables:
+                assert table.name in tables, f"missing table {table.name}"
+                columns = {c["name"] for c in inspector.get_columns(table.name)}
+                expected = {column.name for column in table.columns}
+                assert expected <= columns, (
+                    f"{table.name} is missing {sorted(expected - columns)}"
+                )
+
+            # Downgrading never drops the core tables (it would delete data).
+            command.downgrade(config, "base")
+            remaining = set(inspect(connection).get_table_names())
+            assert {"users", "customers", "jobs", "service_reports", "tasks"} <= remaining
+    finally:
+        test_engine.dispose()
