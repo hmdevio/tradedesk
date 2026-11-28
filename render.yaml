@@ -27,8 +27,10 @@ services:
         sync: false
       - key: DATABASE_SSLMODE
         value: verify-full
+      # The system CA bundle on Render. "system" doesn't work here: the psycopg
+      # binary package ships its own OpenSSL, which looks for CAs elsewhere.
       - key: DATABASE_SSLROOTCERT
-        value: system
+        value: /etc/ssl/certs/ca-certificates.crt
       - key: REDIS_URL
         sync: false
       - key: TRUSTED_PROXY_CIDRS
